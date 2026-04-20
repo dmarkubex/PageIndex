@@ -1081,6 +1081,14 @@ def page_index_main(doc, opt=None):
 
     async def page_index_builder():
         structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
+        # Deterministic leaf chunking (no LLM) — runs before node-ID assignment
+        # and summary generation so that sub-chunks receive proper IDs/summaries.
+        chunk_large_leaf_nodes(
+            structure,
+            page_list=page_list,
+            max_pages=getattr(opt, 'max_chunk_pages_per_leaf', None),
+            max_tokens=getattr(opt, 'max_chunk_tokens_per_leaf', None),
+        )
         if opt.if_add_node_id == 'yes':
             write_node_id(structure)    
         if opt.if_add_node_text == 'yes':
@@ -1111,7 +1119,8 @@ def page_index_main(doc, opt=None):
 
 
 def page_index(doc, model=None, toc_check_page_num=None, max_page_num_each_node=None, max_token_num_each_node=None,
-               if_add_node_id=None, if_add_node_summary=None, if_add_doc_description=None, if_add_node_text=None):
+               if_add_node_id=None, if_add_node_summary=None, if_add_doc_description=None, if_add_node_text=None,
+               max_chunk_pages_per_leaf=None, max_chunk_tokens_per_leaf=None):
     
     user_opt = {
         arg: value for arg, value in locals().items()

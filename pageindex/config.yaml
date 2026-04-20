@@ -8,3 +8,9 @@ if_add_node_id: "yes"
 if_add_node_summary: "yes"
 if_add_doc_description: "no"
 if_add_node_text: "no"
+# Deterministic leaf-node chunking (no LLM required).
+# Leaf nodes exceeding either threshold are split into smaller sub-nodes so
+# that rerankers with limited context windows (e.g. 1024 tokens) can be used.
+# Set to null to disable (default).  Recommended: 3-5 for pages, 800-1000 for tokens.
+max_chunk_pages_per_leaf: null
+max_chunk_tokens_per_leaf: null

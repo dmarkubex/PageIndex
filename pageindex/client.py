@@ -43,9 +43,9 @@ class PageIndexClient:
             overrides["model"] = model
         if retrieve_model:
             overrides["retrieve_model"] = retrieve_model
-        opt = ConfigLoader().load(overrides or None)
-        self.model = opt.model
-        self.retrieve_model = _normalize_retrieve_model(opt.retrieve_model or self.model)
+        self._opt = ConfigLoader().load(overrides or None)
+        self.model = self._opt.model
+        self.retrieve_model = _normalize_retrieve_model(self._opt.retrieve_model or self.model)
         if self.workspace:
             self.workspace.mkdir(parents=True, exist_ok=True)
         self.documents = {}
@@ -74,7 +74,9 @@ class PageIndexClient:
                 if_add_node_summary='yes',
                 if_add_node_text='yes',
                 if_add_node_id='yes',
-                if_add_doc_description='yes'
+                if_add_doc_description='yes',
+                max_chunk_pages_per_leaf=getattr(self._opt, 'max_chunk_pages_per_leaf', None),
+                max_chunk_tokens_per_leaf=getattr(self._opt, 'max_chunk_tokens_per_leaf', None),
             )
             # Extract per-page text so queries don't need the original PDF
             pages = []
@@ -104,7 +106,9 @@ class PageIndexClient:
                 model=self.model,
                 if_add_doc_description='yes',
                 if_add_node_text='yes',
-                if_add_node_id='yes'
+                if_add_node_id='yes',
+                max_chunk_pages_per_leaf=getattr(self._opt, 'max_chunk_pages_per_leaf', None),
+                max_chunk_tokens_per_leaf=getattr(self._opt, 'max_chunk_tokens_per_leaf', None),
             )
             try:
                 asyncio.get_running_loop()
