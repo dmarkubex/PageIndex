@@ -131,10 +131,11 @@ def _iter_leaf_nodes(nodes: list) -> list[dict]:
 
 def _leaf_page_spec(node: dict) -> dict:
     """Return a dict describing the page range of a leaf node."""
+    is_markdown_line = node.get('line_num') is not None and node.get('start_index') is None
     return {
         'start': node.get('start_index') or node.get('line_num'),
         'end': node.get('end_index') or node.get('line_num'),
-        'type': 'line' if node.get('line_num') is not None and node.get('start_index') is None else 'page',
+        'type': 'line' if is_markdown_line else 'page',
     }
 
 

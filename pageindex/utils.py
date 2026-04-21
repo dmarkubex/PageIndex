@@ -59,6 +59,17 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
 
 
 def embedding_completion(model, input_texts):
+    """Return embedding vectors for one or more input texts via LiteLLM.
+
+    Args:
+        model: Embedding model name. Accepts raw provider model names or
+            values prefixed with ``litellm/``.
+        input_texts: A single string or a list of strings to embed.
+
+    Returns:
+        A list of embedding vectors in the same order as the provided inputs.
+        Returns an empty list if all retries fail.
+    """
     if model:
         model = model.removeprefix("litellm/")
     if isinstance(input_texts, str):
