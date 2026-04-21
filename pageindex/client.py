@@ -48,6 +48,7 @@ class PageIndexClient:
         embedding_model: str = None,
         embedding_top_k: int = None,
         hybrid_candidate_top_k: int = None,
+        hybrid_context_window: int = None,
         workspace: str = None,
     ):
         if api_key:
@@ -66,12 +67,15 @@ class PageIndexClient:
             overrides["embedding_top_k"] = embedding_top_k
         if hybrid_candidate_top_k is not None:
             overrides["hybrid_candidate_top_k"] = hybrid_candidate_top_k
+        if hybrid_context_window is not None:
+            overrides["hybrid_context_window"] = hybrid_context_window
         self._opt = ConfigLoader().load(overrides or None)
         self.model = self._opt.model
         self.retrieve_model = _normalize_retrieve_model(self._opt.retrieve_model or self.model)
         self.embedding_model = _normalize_retrieve_model(getattr(self._opt, 'embedding_model', None))
         self.embedding_top_k = max(int(getattr(self._opt, 'embedding_top_k', 5) or 5), 1)
         self.hybrid_candidate_top_k = max(int(getattr(self._opt, 'hybrid_candidate_top_k', 8) or 8), 1)
+        self.hybrid_context_window = max(int(getattr(self._opt, 'hybrid_context_window', 0) or 0), 0)
         if self.workspace:
             self.workspace.mkdir(parents=True, exist_ok=True)
         self.documents = {}
@@ -300,15 +304,17 @@ class PageIndexClient:
         top_k: int = None,
         embedding_model: str = None,
         candidate_k: int = None,
+        context_window: int = None,
     ) -> str:
         """
         Search for relevant content using either tree traversal or embeddings.
 
         strategy='tree' uses top-down LLM traversal.
         strategy='embedding' uses precomputed leaf-node embeddings and returns the
-        page content for the top-k matching leaf nodes.
+        top-k matching leaf-node hits with score and section metadata.
         strategy='hybrid' uses embedding recall first, then LLM reranks the
-        recalled leaf nodes before returning page content.
+        recalled leaf nodes before returning scored hits. Hybrid mode can also
+        expand each selected hit with neighboring page/line context.
         """
         if self.workspace:
             self._ensure_doc_loaded(doc_id)
@@ -331,6 +337,7 @@ class PageIndexClient:
                 embedding_model=model,
                 top_k=top_k or self.embedding_top_k,
                 candidate_k=candidate_k or self.hybrid_candidate_top_k,
+                context_window=self.hybrid_context_window if context_window is None else context_window,
             )
         if strategy != "tree":
             return json.dumps({'error': f'Unknown search strategy: {strategy}'})

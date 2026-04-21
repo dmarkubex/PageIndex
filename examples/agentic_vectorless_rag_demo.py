@@ -78,8 +78,8 @@ def query_agent(client: PageIndexClient, doc_id: str, prompt: str, verbose: bool
         Search the document for sections relevant to the given query.
 
         Uses top-down tree traversal with LLM reasoning at each level to select
-        only the relevant parts of the document. Returns the page content of those
-        sections only — never the whole document. Prefer this over fetching all
+        only the relevant parts of the document. Returns structured section hits
+        with nested content only — never the whole document. Prefer this over fetching all
         leaf nodes manually.
         """
         return client.search_document(doc_id, query)

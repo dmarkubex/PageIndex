@@ -217,6 +217,7 @@ client = PageIndexClient(
     retrieve_model="gpt-5.4",
     embedding_model="text-embedding-3-small",
     embedding_top_k=5,
+    hybrid_context_window=1,
 )
 
 doc_id = client.index("/absolute/path/to/document.pdf")
@@ -238,11 +239,38 @@ client.search_document(
     strategy="hybrid",
     top_k=3,
     candidate_k=8,
+    context_window=1,
 )
 ```
 
 You can also build embeddings later for an existing workspace document with
 `client.build_embedding_index(doc_id)`.
+
+Embedding and hybrid retrieval now return structured hit objects:
+
+```json
+[
+  {
+    "score": 0.9123,
+    "section": {
+      "node_id": "0007",
+      "title": "Revenue Outlook",
+      "summary": "Updated guidance and assumptions.",
+      "start": 12,
+      "end": 13,
+      "type": "page",
+      "context_start": 11,
+      "context_end": 14
+    },
+    "content": [
+      {"page": 11, "content": "..."},
+      {"page": 12, "content": "..."}
+    ]
+  }
+]
+```
+
+Tree search returns the same structure, with `score: null`.
 
 <!--
 # ☁️ Improved Tree Generation with PageIndex OCR
