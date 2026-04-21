@@ -426,6 +426,14 @@ def _glm_ocr_recognize(img_b64: str, api_key: str, max_retries: int = 3) -> str:
                 return ""
 
 
+# Render scale for GLM-OCR page images: higher values improve OCR quality but
+# increase image size and API latency. 2× is a good balance for most PDFs.
+_GLM_OCR_ZOOM = 2
+
+# Maximum concurrent GLM-OCR API requests; keeps well below typical rate limits.
+_GLM_OCR_MAX_WORKERS = 5
+
+
 def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
@@ -460,7 +468,7 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
         else:
             doc = pymupdf.open(pdf_path)
 
-        zoom_matrix = pymupdf.Matrix(2, 2)  # 2x zoom for better OCR quality
+        zoom_matrix = pymupdf.Matrix(_GLM_OCR_ZOOM, _GLM_OCR_ZOOM)
 
         def _ocr_page(page_idx):
             page = doc[page_idx]
@@ -473,7 +481,7 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
 
         num_pages = len(doc)
         print(f"Running GLM-OCR on {num_pages} page(s)...")
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_GLM_OCR_MAX_WORKERS) as executor:
             page_list = list(executor.map(_ocr_page, range(num_pages)))
         return page_list
     else:
