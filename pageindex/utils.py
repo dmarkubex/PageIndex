@@ -58,6 +58,29 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 return ""
 
 
+def embedding_completion(model, input_texts):
+    if model:
+        model = model.removeprefix("litellm/")
+    if isinstance(input_texts, str):
+        input_texts = [input_texts]
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            response = litellm.embedding(
+                model=model,
+                input=input_texts,
+            )
+            return [item["embedding"] for item in response.data]
+        except Exception as e:
+            print('************* Retrying *************')
+            logging.error(f"Error: {e}")
+            if i < max_retries - 1:
+                time.sleep(1)
+            else:
+                logging.error(f"Max retries reached for embedding model: {model}")
+                return []
+
+
 
 async def llm_acompletion(model, prompt):
     if model:
@@ -875,4 +898,3 @@ def chunk_large_leaf_nodes(structure, page_list=None, max_pages=None, max_tokens
             )
 
     return structure
-

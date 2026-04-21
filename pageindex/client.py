@@ -9,7 +9,14 @@ import PyPDF2
 
 from .page_index import page_index
 from .page_index_md import md_to_tree
-from .retrieve import get_document, get_document_structure, get_page_content, search_document
+from .retrieve import (
+    get_document,
+    get_document_structure,
+    get_page_content,
+    search_document,
+    search_document_by_embedding,
+    build_embedding_index,
+)
 from .utils import ConfigLoader, remove_fields
 
 META_INDEX = "_meta.json"
@@ -32,7 +39,15 @@ class PageIndexClient:
 
     For agent-based QA, see examples/agentic_vectorless_rag_demo.py.
     """
-    def __init__(self, api_key: str = None, model: str = None, retrieve_model: str = None, workspace: str = None):
+    def __init__(
+        self,
+        api_key: str = None,
+        model: str = None,
+        retrieve_model: str = None,
+        embedding_model: str = None,
+        embedding_top_k: int = None,
+        workspace: str = None,
+    ):
         if api_key:
             os.environ["OPENAI_API_KEY"] = api_key
         elif not os.getenv("OPENAI_API_KEY") and os.getenv("CHATGPT_API_KEY"):
@@ -43,9 +58,15 @@ class PageIndexClient:
             overrides["model"] = model
         if retrieve_model:
             overrides["retrieve_model"] = retrieve_model
+        if embedding_model is not None:
+            overrides["embedding_model"] = embedding_model
+        if embedding_top_k is not None:
+            overrides["embedding_top_k"] = embedding_top_k
         self._opt = ConfigLoader().load(overrides or None)
         self.model = self._opt.model
         self.retrieve_model = _normalize_retrieve_model(self._opt.retrieve_model or self.model)
+        self.embedding_model = _normalize_retrieve_model(getattr(self._opt, 'embedding_model', None))
+        self.embedding_top_k = max(int(getattr(self._opt, 'embedding_top_k', 5) or 5), 1)
         if self.workspace:
             self.workspace.mkdir(parents=True, exist_ok=True)
         self.documents = {}
@@ -95,6 +116,8 @@ class PageIndexClient:
                 'structure': result['structure'],
                 'pages': pages,
             }
+            if self.embedding_model:
+                build_embedding_index(self.documents[doc_id], self.embedding_model)
 
         elif mode == "md" or (mode == "auto" and is_md):
             print(f"Indexing Markdown: {file_path}")
@@ -125,6 +148,8 @@ class PageIndexClient:
                 'line_count': result.get('line_count', 0),
                 'structure': result['structure'],
             }
+            if self.embedding_model:
+                build_embedding_index(self.documents[doc_id], self.embedding_model)
         else:
             raise ValueError(f"Unsupported file format for: {file_path}")
 
@@ -220,6 +245,8 @@ class PageIndexClient:
         doc['structure'] = full.get('structure', [])
         if full.get('pages'):
             doc['pages'] = full['pages']
+        if full.get('embedding_indexes') is not None:
+            doc['embedding_indexes'] = full['embedding_indexes']
 
     def get_document(self, doc_id: str) -> str:
         """Return document metadata JSON."""
@@ -237,14 +264,48 @@ class PageIndexClient:
             self._ensure_doc_loaded(doc_id)
         return get_page_content(self.documents, doc_id, pages)
 
-    def search_document(self, doc_id: str, query: str) -> str:
-        """
-        Search for relevant content using top-down tree traversal.
+    def build_embedding_index(self, doc_id: str, embedding_model: str = None) -> str:
+        """Build and persist a leaf-node embedding index for the document."""
+        if self.workspace:
+            self._ensure_doc_loaded(doc_id)
+        doc = self.documents.get(doc_id)
+        if not doc:
+            return json.dumps({'error': f'Document {doc_id} not found'})
+        model = _normalize_retrieve_model(embedding_model or self.embedding_model)
+        if not model:
+            return json.dumps({'error': 'No embedding_model configured'})
+        try:
+            index = build_embedding_index(doc, model)
+        except Exception as e:
+            return json.dumps({'error': f'Failed to build embedding index: {e}'})
+        if self.workspace:
+            self._save_doc(doc_id)
+            self._ensure_doc_loaded(doc_id)
+        return json.dumps({
+            'doc_id': doc_id,
+            'embedding_model': model,
+            'indexed_leaf_count': len(index.get('items', [])),
+        })
 
-        Uses LLM reasoning at each tree level to select only the sections
-        relevant to *query*, drilling down to the appropriate leaf nodes.
-        Returns the page content of those sections only — never the whole document.
+    def search_document(self, doc_id: str, query: str, strategy: str = "tree", top_k: int = None, embedding_model: str = None) -> str:
+        """
+        Search for relevant content using either tree traversal or embeddings.
+
+        strategy='tree' uses top-down LLM traversal.
+        strategy='embedding' uses precomputed leaf-node embeddings and returns the
+        page content for the top-k matching leaf nodes.
         """
         if self.workspace:
             self._ensure_doc_loaded(doc_id)
+        if strategy == "embedding":
+            model = _normalize_retrieve_model(embedding_model or self.embedding_model)
+            return search_document_by_embedding(
+                self.documents,
+                doc_id,
+                query,
+                embedding_model=model,
+                top_k=top_k or self.embedding_top_k,
+            )
+        if strategy != "tree":
+            return json.dumps({'error': f'Unknown search strategy: {strategy}'})
         return search_document(self.documents, doc_id, query, model=self.retrieve_model)

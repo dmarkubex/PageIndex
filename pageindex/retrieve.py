@@ -1,11 +1,24 @@
 import json
 import logging
+import math
 import PyPDF2
 
 try:
-    from .utils import get_number_of_pages, remove_fields, llm_completion, extract_json
+    from .utils import (
+        get_number_of_pages,
+        remove_fields,
+        llm_completion,
+        extract_json,
+        embedding_completion,
+    )
 except ImportError:
-    from utils import get_number_of_pages, remove_fields, llm_completion, extract_json
+    from utils import (
+        get_number_of_pages,
+        remove_fields,
+        llm_completion,
+        extract_json,
+        embedding_completion,
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -75,6 +88,144 @@ def _get_md_page_content(doc_info: dict, page_nums: list[int]) -> list[dict]:
     _traverse(doc_info.get('structure', []))
     results.sort(key=lambda x: x['page'])
     return results
+
+
+def _get_pdf_page_map(doc_info: dict) -> dict[int, str]:
+    cached_pages = doc_info.get('pages')
+    if cached_pages:
+        return {p['page']: p['content'] for p in cached_pages}
+    path = doc_info['path']
+    with open(path, 'rb') as f:
+        pdf_reader = PyPDF2.PdfReader(f)
+        return {
+            i: pdf_reader.pages[i - 1].extract_text() or ''
+            for i in range(1, len(pdf_reader.pages) + 1)
+        }
+
+
+def _collect_md_line_text(nodes: list, line_map: dict[int, str]) -> None:
+    for node in nodes:
+        line_num = node.get('line_num')
+        if line_num is not None and line_num not in line_map:
+            line_map[line_num] = node.get('text', '')
+        if node.get('nodes'):
+            _collect_md_line_text(node['nodes'], line_map)
+
+
+def _get_md_line_map(doc_info: dict) -> dict[int, str]:
+    line_map = {}
+    _collect_md_line_text(doc_info.get('structure', []), line_map)
+    return line_map
+
+
+def _iter_leaf_nodes(nodes: list) -> list[dict]:
+    leaf_nodes = []
+    for node in nodes:
+        children = node.get('nodes', [])
+        if children:
+            leaf_nodes.extend(_iter_leaf_nodes(children))
+        else:
+            leaf_nodes.append(node)
+    return leaf_nodes
+
+
+def _leaf_page_spec(node: dict) -> dict:
+    """Return a dict describing the page range of a leaf node."""
+    return {
+        'start': node.get('start_index') or node.get('line_num'),
+        'end': node.get('end_index') or node.get('line_num'),
+        'type': 'line' if node.get('line_num') is not None and node.get('start_index') is None else 'page',
+    }
+
+
+def _get_spec_content(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
+    start = spec.get('start')
+    end = spec.get('end')
+    if start is None or end is None:
+        return ""
+    if doc_info.get('type') == 'pdf':
+        pdf_page_map = pdf_page_map or _get_pdf_page_map(doc_info)
+        return "\n\n".join(
+            pdf_page_map[p]
+            for p in range(start, end + 1)
+            if p in pdf_page_map and pdf_page_map[p]
+        )
+    md_line_map = md_line_map or _get_md_line_map(doc_info)
+    return "\n\n".join(
+        md_line_map[line]
+        for line in range(start, end + 1)
+        if line in md_line_map and md_line_map[line]
+    )
+
+
+def _build_embedding_text(node: dict, content: str) -> str:
+    parts = [
+        node.get('title', ''),
+        node.get('summary') or node.get('prefix_summary', ''),
+        content,
+    ]
+    return "\n\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def build_embedding_index(doc_info: dict, embedding_model: str) -> dict:
+    """Build and cache an embedding index for the document's leaf nodes."""
+    if not embedding_model:
+        raise ValueError("embedding_model is required")
+
+    embedding_indexes = doc_info.setdefault('embedding_indexes', {})
+    existing = embedding_indexes.get(embedding_model)
+    if existing and existing.get('items'):
+        return existing
+
+    structure = doc_info.get('structure', [])
+    leaf_nodes = _iter_leaf_nodes(structure)
+    pdf_page_map = _get_pdf_page_map(doc_info) if doc_info.get('type') == 'pdf' else None
+    md_line_map = _get_md_line_map(doc_info) if doc_info.get('type') != 'pdf' else None
+
+    items = []
+    embedding_texts = []
+    for node in leaf_nodes:
+        spec = _leaf_page_spec(node)
+        content = _get_spec_content(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
+        embedding_text = _build_embedding_text(node, content)
+        if not embedding_text:
+            continue
+        items.append({
+            'node_id': node.get('node_id'),
+            'title': node.get('title', ''),
+            'summary': node.get('summary') or node.get('prefix_summary', ''),
+            'start': spec.get('start'),
+            'end': spec.get('end'),
+            'type': spec.get('type'),
+        })
+        embedding_texts.append(embedding_text)
+
+    if not items:
+        index = {'model': embedding_model, 'items': []}
+        embedding_indexes[embedding_model] = index
+        return index
+
+    vectors = embedding_completion(model=embedding_model, input_texts=embedding_texts)
+    if len(vectors) != len(items):
+        raise RuntimeError(
+            f"Failed to build embeddings for all leaf nodes: expected {len(items)}, got {len(vectors)}"
+        )
+
+    for item, vector in zip(items, vectors):
+        item['embedding'] = vector
+
+    index = {'model': embedding_model, 'items': items}
+    embedding_indexes[embedding_model] = index
+    return index
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 # ── Tool functions ────────────────────────────────────────────────────────────
@@ -212,14 +363,6 @@ def search_document(documents: dict, doc_id: str, query: str, model: str = None)
             result.extend(_collect_all_leaf_pages(child))
         return result
 
-    def _leaf_page_spec(node: dict) -> dict:
-        """Return a dict describing the page range of a leaf node."""
-        return {
-            'start': node.get('start_index') or node.get('line_num'),
-            'end': node.get('end_index') or node.get('line_num'),
-            'type': 'line' if node.get('line_num') is not None and node.get('start_index') is None else 'page',
-        }
-
     def _traverse(nodes: list, query: str) -> list:
         """Recursively traverse the tree, collecting page specs for relevant leaves."""
         relevant_indices = _select_relevant_indices(nodes, query)
@@ -251,6 +394,58 @@ def search_document(documents: dict, doc_id: str, query: str, model: str = None)
         for p in range(spec['start'], spec['end'] + 1)
     })
 
+    if not page_nums:
+        return json.dumps([])
+
+    try:
+        if doc_info.get('type') == 'pdf':
+            content = _get_pdf_page_content(doc_info, page_nums)
+        else:
+            content = _get_md_page_content(doc_info, page_nums)
+    except Exception as e:
+        return json.dumps({'error': f'Failed to read page content: {e}'})
+
+    return json.dumps(content, ensure_ascii=False)
+
+
+def search_document_by_embedding(documents: dict, doc_id: str, query: str, embedding_model: str, top_k: int = 5) -> str:
+    """
+    Search for relevant content using precomputed leaf-node embeddings.
+
+    Returns the same JSON payload as search_document(): a list of {'page': int, 'content': str}.
+    """
+    doc_info = documents.get(doc_id)
+    if not doc_info:
+        return json.dumps({'error': f'Document {doc_id} not found'})
+    if not embedding_model:
+        return json.dumps({'error': 'Embedding search requires an embedding_model'})
+    if not query or not query.strip():
+        return json.dumps({'error': 'Query must not be empty'})
+
+    try:
+        index = build_embedding_index(doc_info, embedding_model)
+        items = index.get('items', [])
+        if not items:
+            return json.dumps([])
+        query_embedding = embedding_completion(model=embedding_model, input_texts=[query])
+        if not query_embedding:
+            return json.dumps({'error': 'Failed to create query embedding'})
+        query_vector = query_embedding[0]
+        top_k = max(int(top_k or 5), 1)
+        ranked_items = sorted(
+            items,
+            key=lambda item: _cosine_similarity(query_vector, item.get('embedding', [])),
+            reverse=True,
+        )[:top_k]
+    except Exception as e:
+        return json.dumps({'error': f'Embedding search failed: {e}'})
+
+    page_nums = sorted({
+        p
+        for item in ranked_items
+        if item.get('start') is not None and item.get('end') is not None
+        for p in range(item['start'], item['end'] + 1)
+    })
     if not page_nums:
         return json.dumps([])
 
