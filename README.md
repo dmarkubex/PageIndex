@@ -230,6 +230,15 @@ client.search_document(
     "What changed in revenue guidance?",
     strategy="embedding",
 )
+
+# Hybrid search: embedding recall + LLM rerank
+client.search_document(
+    doc_id,
+    "What changed in revenue guidance?",
+    strategy="hybrid",
+    top_k=3,
+    candidate_k=8,
+)
 ```
 
 You can also build embeddings later for an existing workspace document with

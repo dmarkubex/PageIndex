@@ -15,6 +15,7 @@ from .retrieve import (
     get_page_content,
     search_document,
     search_document_by_embedding,
+    search_document_hybrid,
     build_embedding_index,
 )
 from .utils import ConfigLoader, remove_fields
@@ -46,6 +47,7 @@ class PageIndexClient:
         retrieve_model: str = None,
         embedding_model: str = None,
         embedding_top_k: int = None,
+        hybrid_candidate_top_k: int = None,
         workspace: str = None,
     ):
         if api_key:
@@ -62,11 +64,14 @@ class PageIndexClient:
             overrides["embedding_model"] = embedding_model
         if embedding_top_k is not None:
             overrides["embedding_top_k"] = embedding_top_k
+        if hybrid_candidate_top_k is not None:
+            overrides["hybrid_candidate_top_k"] = hybrid_candidate_top_k
         self._opt = ConfigLoader().load(overrides or None)
         self.model = self._opt.model
         self.retrieve_model = _normalize_retrieve_model(self._opt.retrieve_model or self.model)
         self.embedding_model = _normalize_retrieve_model(getattr(self._opt, 'embedding_model', None))
         self.embedding_top_k = max(int(getattr(self._opt, 'embedding_top_k', 5) or 5), 1)
+        self.hybrid_candidate_top_k = max(int(getattr(self._opt, 'hybrid_candidate_top_k', 8) or 8), 1)
         if self.workspace:
             self.workspace.mkdir(parents=True, exist_ok=True)
         self.documents = {}
@@ -287,13 +292,23 @@ class PageIndexClient:
             'indexed_leaf_count': len(index.get('items', [])),
         })
 
-    def search_document(self, doc_id: str, query: str, strategy: str = "tree", top_k: int = None, embedding_model: str = None) -> str:
+    def search_document(
+        self,
+        doc_id: str,
+        query: str,
+        strategy: str = "tree",
+        top_k: int = None,
+        embedding_model: str = None,
+        candidate_k: int = None,
+    ) -> str:
         """
         Search for relevant content using either tree traversal or embeddings.
 
         strategy='tree' uses top-down LLM traversal.
         strategy='embedding' uses precomputed leaf-node embeddings and returns the
         page content for the top-k matching leaf nodes.
+        strategy='hybrid' uses embedding recall first, then LLM reranks the
+        recalled leaf nodes before returning page content.
         """
         if self.workspace:
             self._ensure_doc_loaded(doc_id)
@@ -305,6 +320,17 @@ class PageIndexClient:
                 query,
                 embedding_model=model,
                 top_k=top_k or self.embedding_top_k,
+            )
+        if strategy == "hybrid":
+            model = _normalize_retrieve_model(embedding_model or self.embedding_model)
+            return search_document_hybrid(
+                self.documents,
+                doc_id,
+                query,
+                model=self.retrieve_model,
+                embedding_model=model,
+                top_k=top_k or self.embedding_top_k,
+                candidate_k=candidate_k or self.hybrid_candidate_top_k,
             )
         if strategy != "tree":
             return json.dumps({'error': f'Unknown search strategy: {strategy}'})

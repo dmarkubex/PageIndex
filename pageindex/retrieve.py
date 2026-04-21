@@ -229,6 +229,89 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _collect_page_nums_from_ranges(items: list[dict]) -> list[int]:
+    return sorted({
+        p
+        for item in items
+        if item.get('start') is not None and item.get('end') is not None
+        for p in range(item['start'], item['end'] + 1)
+    })
+
+
+def _get_content_for_page_nums(doc_info: dict, page_nums: list[int]) -> list[dict]:
+    if not page_nums:
+        return []
+    if doc_info.get('type') == 'pdf':
+        return _get_pdf_page_content(doc_info, page_nums)
+    return _get_md_page_content(doc_info, page_nums)
+
+
+def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_k: int) -> list[dict]:
+    index = build_embedding_index(doc_info, embedding_model)
+    items = index.get('items', [])
+    if not items:
+        return []
+
+    query_embedding = embedding_completion(model=embedding_model, input_texts=[query])
+    if not query_embedding:
+        raise RuntimeError('Failed to create query embedding')
+    query_vector = query_embedding[0]
+    top_k = min(max(int(top_k or 5), 1), len(items))
+
+    ranked_items = []
+    for item in items:
+        ranked_item = dict(item)
+        ranked_item['score'] = _cosine_similarity(query_vector, item.get('embedding', []))
+        ranked_items.append(ranked_item)
+    ranked_items.sort(key=lambda item: item['score'], reverse=True)
+    return ranked_items[:top_k]
+
+
+def _select_hybrid_candidates(query: str, candidates: list[dict], model: str, top_k: int) -> list[dict]:
+    if not candidates:
+        return []
+    candidate_payload = [
+        {
+            'index': i,
+            'title': item.get('title', ''),
+            'summary': item.get('summary', ''),
+            'start': item.get('start'),
+            'end': item.get('end'),
+            'score': round(item.get('score', 0.0), 4),
+        }
+        for i, item in enumerate(candidates)
+    ]
+    prompt = (
+        "You are reranking document sections for retrieval.\n\n"
+        f"Query: {query}\n\n"
+        f"Candidate sections:\n{json.dumps(candidate_payload, indent=2, ensure_ascii=False)}\n\n"
+        f"Return a JSON array with up to {top_k} candidate indices that are most useful for answering the query. "
+        "Prefer precise sections over loosely related ones. Return [] if none are relevant. "
+        "Directly return the JSON array and nothing else."
+    )
+
+    response = llm_completion(model=model, prompt=prompt)
+    try:
+        indices = extract_json(response)
+        if isinstance(indices, list):
+            selected = []
+            seen = set()
+            for index in indices:
+                if isinstance(index, int) and 0 <= index < len(candidates) and index not in seen:
+                    selected.append(candidates[index])
+                    seen.add(index)
+                if len(selected) >= top_k:
+                    break
+            return selected
+    except Exception:
+        pass
+
+    logging.warning(
+        "search_document_hybrid: failed to parse rerank response; falling back to top embedding candidates."
+    )
+    return candidates[:top_k]
+
+
 # ── Tool functions ────────────────────────────────────────────────────────────
 
 def get_document(documents: dict, doc_id: str) -> str:
@@ -424,37 +507,64 @@ def search_document_by_embedding(documents: dict, doc_id: str, query: str, embed
         return json.dumps({'error': 'Query must not be empty'})
 
     try:
-        index = build_embedding_index(doc_info, embedding_model)
-        items = index.get('items', [])
-        if not items:
-            return json.dumps([])
-        query_embedding = embedding_completion(model=embedding_model, input_texts=[query])
-        if not query_embedding:
-            return json.dumps({'error': 'Failed to create query embedding'})
-        query_vector = query_embedding[0]
-        top_k = max(int(top_k or 5), 1)
-        ranked_items = sorted(
-            items,
-            key=lambda item: _cosine_similarity(query_vector, item.get('embedding', [])),
-            reverse=True,
-        )[:top_k]
+        ranked_items = _rank_embedding_items(doc_info, query, embedding_model, top_k=top_k)
     except Exception as e:
         return json.dumps({'error': f'Embedding search failed: {e}'})
 
-    page_nums = sorted({
-        p
-        for item in ranked_items
-        if item.get('start') is not None and item.get('end') is not None
-        for p in range(item['start'], item['end'] + 1)
-    })
+    page_nums = _collect_page_nums_from_ranges(ranked_items)
     if not page_nums:
         return json.dumps([])
 
     try:
-        if doc_info.get('type') == 'pdf':
-            content = _get_pdf_page_content(doc_info, page_nums)
-        else:
-            content = _get_md_page_content(doc_info, page_nums)
+        content = _get_content_for_page_nums(doc_info, page_nums)
+    except Exception as e:
+        return json.dumps({'error': f'Failed to read page content: {e}'})
+
+    return json.dumps(content, ensure_ascii=False)
+
+
+def search_document_hybrid(
+    documents: dict,
+    doc_id: str,
+    query: str,
+    model: str = None,
+    embedding_model: str = None,
+    top_k: int = 5,
+    candidate_k: int = 8,
+) -> str:
+    """
+    Search using embedding recall followed by LLM reranking of the recalled leaves.
+
+    Returns the same JSON payload as search_document(): a list of {'page': int, 'content': str}.
+    """
+    doc_info = documents.get(doc_id)
+    if not doc_info:
+        return json.dumps({'error': f'Document {doc_id} not found'})
+    if not embedding_model:
+        return json.dumps({'error': 'Hybrid search requires an embedding_model'})
+    if not model:
+        return json.dumps({'error': 'Hybrid search requires a rerank model'})
+    if not query or not query.strip():
+        return json.dumps({'error': 'Query must not be empty'})
+
+    try:
+        top_k = max(int(top_k or 5), 1)
+        candidate_k = max(int(candidate_k or top_k), top_k)
+        candidates = _rank_embedding_items(doc_info, query, embedding_model, top_k=candidate_k)
+        if not candidates:
+            return json.dumps([])
+        selected_items = _select_hybrid_candidates(query, candidates, model=model, top_k=top_k)
+        if not selected_items:
+            selected_items = candidates[:top_k]
+    except Exception as e:
+        return json.dumps({'error': f'Hybrid search failed: {e}'})
+
+    page_nums = _collect_page_nums_from_ranges(selected_items)
+    if not page_nums:
+        return json.dumps([])
+
+    try:
+        content = _get_content_for_page_nums(doc_info, page_nums)
     except Exception as e:
         return json.dumps({'error': f'Failed to read page content: {e}'})
 
