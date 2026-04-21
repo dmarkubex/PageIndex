@@ -1,4 +1,5 @@
 import json
+import logging
 import PyPDF2
 
 try:
@@ -146,7 +147,15 @@ def search_document(documents: dict, doc_id: str, query: str, model: str = None)
     relevant leaf nodes and returns only their page content — never the whole
     document.
 
-    Returns JSON list of {'page': int, 'content': str}.
+    Args:
+        documents: Mapping of doc_id to document info dicts (as held by PageIndexClient).
+        doc_id: Identifier of the document to search.
+        query: Natural-language question or search query.
+        model: LLM model name to use for node selection (defaults to the caller's model).
+
+    Returns:
+        JSON-encoded list of {'page': int, 'content': str} dicts for the relevant sections,
+        or a JSON object with an 'error' key on failure.
     """
     doc_info = documents.get(doc_id)
     if not doc_info:
@@ -185,7 +194,12 @@ def search_document(documents: dict, doc_id: str, query: str, model: str = None)
                 return [i for i in indices if isinstance(i, int) and 0 <= i < len(nodes)]
         except Exception:
             pass
-        # Fallback: treat all nodes as relevant
+        # Fallback: log a warning and treat all nodes as relevant so no content is lost
+        logging.warning(
+            "search_document: failed to parse LLM node-selection response; "
+            "falling back to selecting all %d nodes at this level.",
+            len(nodes),
+        )
         return list(range(len(nodes)))
 
     def _collect_all_leaf_pages(node: dict) -> list:
