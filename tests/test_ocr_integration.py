@@ -171,7 +171,7 @@ class TestGetPageTokensGlmOcr(unittest.TestCase):
         env_without_keys = {k: v for k, v in os.environ.items()
                             if k not in ("GLM_OCR_API_KEY", "ZHIPU_API_KEY")}
         with patch.dict("os.environ", env_without_keys, clear=True):
-            with self.assertRaises(ValueError, msg="Should raise when no API key is set"):
+            with self.assertRaises(ValueError, msg="Expected ValueError when no API key is set but none was raised"):
                 get_page_tokens(pdf_bytes, pdf_parser="glm-ocr")
 
     def test_accepts_glm_ocr_api_key_env_var(self):
@@ -418,5 +418,5 @@ class TestPageIndexWithGlmOcrLive(unittest.TestCase):
         non_empty = sum(1 for text, _ in result if text.strip())
         self.assertGreater(
             non_empty, 0,
-            "At least one page should contain recognised text from a real PDF",
+            "At least one page should contain recognized text from a real PDF",
         )
