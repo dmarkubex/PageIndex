@@ -45,8 +45,11 @@ AGENT_SYSTEM_PROMPT = """
 You are PageIndex, a document QA assistant.
 TOOL USE:
 - Call get_document() first to confirm status and page/line count.
-- Call get_document_structure() to identify relevant page ranges.
-- Call get_page_content(pages="5-7") with tight ranges; never fetch the whole document.
+- Call search_document(query) to retrieve only the sections relevant to the question.
+  This performs an internal tree search and returns targeted content — do NOT fetch
+  the whole document or iterate over all sections manually.
+- If you need to inspect the full structure before searching, call get_document_structure().
+- If you need a specific page range after searching, call get_page_content(pages="5-7").
 - Before each tool call, output one short sentence explaining the reason.
 Answer based only on tool output. Be concise.
 """
@@ -66,8 +69,20 @@ def query_agent(client: PageIndexClient, doc_id: str, prompt: str, verbose: bool
 
     @function_tool
     def get_document_structure() -> str:
-        """Get the document's full tree structure (without text) to find relevant sections."""
+        """Get the document's full tree structure (without text) to browse available sections."""
         return client.get_document_structure(doc_id)
+
+    @function_tool
+    def search_document(query: str) -> str:
+        """
+        Search the document for sections relevant to the given query.
+
+        Uses top-down tree traversal with LLM reasoning at each level to select
+        only the relevant parts of the document. Returns the page content of those
+        sections only — never the whole document. Prefer this over fetching all
+        leaf nodes manually.
+        """
+        return client.search_document(doc_id, query)
 
     @function_tool
     def get_page_content(pages: str) -> str:
@@ -81,7 +96,7 @@ def query_agent(client: PageIndexClient, doc_id: str, prompt: str, verbose: bool
     agent = Agent(
         name="PageIndex",
         instructions=AGENT_SYSTEM_PROMPT,
-        tools=[get_document, get_document_structure, get_page_content],
+        tools=[get_document, get_document_structure, search_document, get_page_content],
         model=client.retrieve_model,
         # model_settings=ModelSettings(reasoning={"effort": "low", "summary": "auto"}),  # Uncomment to enable reasoning
     )
