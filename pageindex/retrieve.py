@@ -91,6 +91,7 @@ def _get_md_page_content(doc_info: dict, page_nums: list[int]) -> list[dict]:
 
 
 def _get_pdf_page_map(doc_info: dict) -> dict[int, str]:
+    """Return a mapping of PDF page number to extracted page text."""
     cached_pages = doc_info.get('pages')
     if cached_pages:
         return {p['page']: p['content'] for p in cached_pages}
@@ -104,6 +105,7 @@ def _get_pdf_page_map(doc_info: dict) -> dict[int, str]:
 
 
 def _collect_md_line_text(nodes: list, line_map: dict[int, str]) -> None:
+    """Recursively collect Markdown node text into a line-number-to-text map."""
     for node in nodes:
         line_num = node.get('line_num')
         if line_num is not None and line_num not in line_map:
@@ -113,12 +115,14 @@ def _collect_md_line_text(nodes: list, line_map: dict[int, str]) -> None:
 
 
 def _get_md_line_map(doc_info: dict) -> dict[int, str]:
+    """Build a mapping of Markdown line numbers to node text."""
     line_map = {}
     _collect_md_line_text(doc_info.get('structure', []), line_map)
     return line_map
 
 
 def _iter_leaf_nodes(nodes: list) -> list[dict]:
+    """Return every leaf node under the provided tree nodes."""
     leaf_nodes = []
     for node in nodes:
         children = node.get('nodes', [])
@@ -129,17 +133,26 @@ def _iter_leaf_nodes(nodes: list) -> list[dict]:
     return leaf_nodes
 
 
+def _is_line_based_node(node: dict) -> bool:
+    """Return True when a node uses Markdown line numbering instead of pages."""
+    return node.get('line_num') is not None and node.get('start_index') is None
+
+
+def _normalize_top_k(top_k: int | None, max_value: int, default: int = 5) -> int:
+    """Clamp top_k to the inclusive range [1, max_value] using a default when missing."""
+    return min(max(int(top_k or default), 1), max_value)
+
+
 def _leaf_page_spec(node: dict) -> dict:
     """Return a dict describing the page range of a leaf node."""
-    is_line_based_node = node.get('line_num') is not None and node.get('start_index') is None
     return {
         'start': node.get('start_index') or node.get('line_num'),
         'end': node.get('end_index') or node.get('line_num'),
-        'type': 'line' if is_line_based_node else 'page',
+        'type': 'line' if _is_line_based_node(node) else 'page',
     }
 
 
-def _get_content_from_page_spec(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
+def _get_content_from_range(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
     start = spec.get('start')
     end = spec.get('end')
     if start is None or end is None:
@@ -187,7 +200,7 @@ def build_embedding_index(doc_info: dict, embedding_model: str) -> dict:
     embedding_texts = []
     for node in leaf_nodes:
         spec = _leaf_page_spec(node)
-        content = _get_content_from_page_spec(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
+        content = _get_content_from_range(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
         embedding_text = _build_embedding_text(node, content)
         if not embedding_text:
             continue
@@ -221,6 +234,7 @@ def build_embedding_index(doc_info: dict, embedding_model: str) -> dict:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two embedding vectors."""
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
@@ -230,6 +244,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def _collect_page_nums_from_ranges(items: list[dict]) -> list[int]:
+    """Return sorted unique page or line numbers covered by range items."""
     return sorted({
         p
         for item in items
@@ -239,6 +254,7 @@ def _collect_page_nums_from_ranges(items: list[dict]) -> list[int]:
 
 
 def _get_content_for_page_nums(doc_info: dict, page_nums: list[int]) -> list[dict]:
+    """Fetch page or line content for the provided normalized page numbers."""
     if not page_nums:
         return []
     if doc_info.get('type') == 'pdf':
@@ -247,6 +263,7 @@ def _get_content_for_page_nums(doc_info: dict, page_nums: list[int]) -> list[dic
 
 
 def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_k: int) -> list[dict]:
+    """Rank indexed leaf nodes by embedding similarity to the query."""
     index = build_embedding_index(doc_info, embedding_model)
     items = index.get('items', [])
     if not items:
@@ -256,7 +273,7 @@ def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_
     if not query_embedding:
         raise RuntimeError('Failed to create query embedding')
     query_vector = query_embedding[0]
-    top_k = min(max(int(top_k or 5), 1), len(items))
+    top_k = _normalize_top_k(top_k, len(items))
 
     ranked_items = []
     for item in items:
@@ -268,6 +285,7 @@ def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_
 
 
 def _select_hybrid_candidates(query: str, candidates: list[dict], model: str, top_k: int) -> list[dict]:
+    """Use the rerank LLM to pick the most relevant embedding-recalled candidates."""
     if not candidates:
         return []
     candidate_payload = [
@@ -553,6 +571,7 @@ def search_document_hybrid(
         candidates = _rank_embedding_items(doc_info, query, embedding_model, top_k=candidate_k)
         if not candidates:
             return json.dumps([])
+        top_k = _normalize_top_k(top_k, len(candidates))
         selected_items = _select_hybrid_candidates(query, candidates, model=model, top_k=top_k)
         if not selected_items:
             selected_items = candidates[:top_k]
