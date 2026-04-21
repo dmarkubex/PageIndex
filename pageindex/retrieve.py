@@ -131,15 +131,15 @@ def _iter_leaf_nodes(nodes: list) -> list[dict]:
 
 def _leaf_page_spec(node: dict) -> dict:
     """Return a dict describing the page range of a leaf node."""
-    is_markdown_line = node.get('line_num') is not None and node.get('start_index') is None
+    is_line_based_node = node.get('line_num') is not None and node.get('start_index') is None
     return {
         'start': node.get('start_index') or node.get('line_num'),
         'end': node.get('end_index') or node.get('line_num'),
-        'type': 'line' if is_markdown_line else 'page',
+        'type': 'line' if is_line_based_node else 'page',
     }
 
 
-def _get_spec_content(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
+def _get_content_from_page_spec(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
     start = spec.get('start')
     end = spec.get('end')
     if start is None or end is None:
@@ -187,7 +187,7 @@ def build_embedding_index(doc_info: dict, embedding_model: str) -> dict:
     embedding_texts = []
     for node in leaf_nodes:
         spec = _leaf_page_spec(node)
-        content = _get_spec_content(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
+        content = _get_content_from_page_spec(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
         embedding_text = _build_embedding_text(node, content)
         if not embedding_text:
             continue
