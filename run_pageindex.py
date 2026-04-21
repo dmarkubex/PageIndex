@@ -28,6 +28,8 @@ if __name__ == "__main__":
                       help='Whether to add doc description to the doc')
     parser.add_argument('--if-add-node-text', type=str, default=None,
                       help='Whether to add text to the node')
+    parser.add_argument('--pdf-parser', type=str, default=None,
+                      help='PDF text extraction backend: PyPDF2 (default), PyMuPDF, or glm-ocr')
                       
     # Markdown specific arguments
     parser.add_argument('--if-thinning', type=str, default='no',
@@ -61,6 +63,7 @@ if __name__ == "__main__":
             'if_add_node_summary': args.if_add_node_summary,
             'if_add_doc_description': args.if_add_doc_description,
             'if_add_node_text': args.if_add_node_text,
+            'pdf_parser': args.pdf_parser,
         }
         opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
 

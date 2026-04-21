@@ -5,6 +5,9 @@ import textwrap
 from datetime import datetime
 import time
 import json
+import base64
+import concurrent.futures
+import requests
 import PyPDF2
 import copy
 import asyncio
@@ -384,6 +387,53 @@ def add_preface_if_needed(data):
 
 
 
+def _glm_ocr_recognize(img_b64: str, api_key: str, max_retries: int = 3) -> str:
+    """Call the GLM-OCR API to extract text from a base64-encoded page image."""
+    url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "glm-4v-ocr",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": "请识别图片中的所有文字内容，保持原有的格式和排版。",
+                    },
+                ],
+            }
+        ],
+    }
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logging.error(f"GLM-OCR attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                logging.error("GLM-OCR max retries reached, returning empty string")
+                return ""
+
+
+# Render scale for GLM-OCR page images: higher values improve OCR quality but
+# increase image size and API latency. 2× is a good balance for most PDFs.
+_GLM_OCR_ZOOM = 2
+
+# Maximum concurrent GLM-OCR API requests; keeps well below typical rate limits.
+_GLM_OCR_MAX_WORKERS = 5
+
+
 def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
@@ -405,6 +455,34 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
             page_text = page.get_text()
             token_length = litellm.token_counter(model=model, text=page_text)
             page_list.append((page_text, token_length))
+        return page_list
+    elif pdf_parser == "glm-ocr":
+        glm_api_key = os.getenv("GLM_OCR_API_KEY") or os.getenv("ZHIPU_API_KEY")
+        if not glm_api_key:
+            raise ValueError(
+                "GLM-OCR requires an API key. "
+                "Set the GLM_OCR_API_KEY environment variable."
+            )
+        if isinstance(pdf_path, BytesIO):
+            doc = pymupdf.open(stream=pdf_path, filetype="pdf")
+        else:
+            doc = pymupdf.open(pdf_path)
+
+        zoom_matrix = pymupdf.Matrix(_GLM_OCR_ZOOM, _GLM_OCR_ZOOM)
+
+        def _ocr_page(page_idx):
+            page = doc[page_idx]
+            pix = page.get_pixmap(matrix=zoom_matrix)
+            img_bytes = pix.tobytes("png")
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            page_text = _glm_ocr_recognize(img_b64, glm_api_key)
+            token_length = litellm.token_counter(model=model, text=page_text)
+            return (page_text, token_length)
+
+        num_pages = len(doc)
+        print(f"Running GLM-OCR on {num_pages} page(s)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_GLM_OCR_MAX_WORKERS) as executor:
+            page_list = list(executor.map(_ocr_page, range(num_pages)))
         return page_list
     else:
         raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
