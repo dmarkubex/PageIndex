@@ -138,7 +138,7 @@ def _is_line_based_node(node: dict) -> bool:
     return node.get('line_num') is not None and node.get('start_index') is None
 
 
-def _normalize_top_k(top_k: int | None, max_value: int, default: int = 5) -> int:
+def _clamp_top_k(top_k: int | None, max_value: int, default: int = 5) -> int:
     """Clamp top_k to the inclusive range [1, max_value] using a default when missing."""
     return min(max(int(top_k or default), 1), max_value)
 
@@ -273,7 +273,7 @@ def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_
     if not query_embedding:
         raise RuntimeError('Failed to create query embedding')
     query_vector = query_embedding[0]
-    top_k = _normalize_top_k(top_k, len(items))
+    top_k = _clamp_top_k(top_k, len(items))
 
     ranked_items = []
     for item in items:
@@ -571,7 +571,7 @@ def search_document_hybrid(
         candidates = _rank_embedding_items(doc_info, query, embedding_model, top_k=candidate_k)
         if not candidates:
             return json.dumps([])
-        top_k = _normalize_top_k(top_k, len(candidates))
+        top_k = _clamp_top_k(top_k, len(candidates))
         selected_items = _select_hybrid_candidates(query, candidates, model=model, top_k=top_k)
         if not selected_items:
             selected_items = candidates[:top_k]
