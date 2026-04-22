@@ -240,7 +240,7 @@ def clean_tree_for_output(tree_nodes):
     return cleaned_nodes
 
 
-async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_add_node_summary='no', summary_token_threshold=None, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes'):
+async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_add_node_summary='no', summary_token_threshold=None, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes', max_chunk_pages_per_leaf=None, max_chunk_tokens_per_leaf=None):
     with open(md_path, 'r', encoding='utf-8') as f:
         markdown_content = f.read()
     line_count = markdown_content.count('\n') + 1
@@ -258,6 +258,16 @@ async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_ad
     
     print(f"Building tree from nodes...")
     tree_structure = build_tree_from_nodes(nodes_with_content)
+
+    # Deterministic leaf chunking (no LLM) — runs before node-ID assignment
+    # and summary generation so that sub-chunks receive proper IDs/summaries.
+    if max_chunk_tokens_per_leaf:
+        chunk_large_leaf_nodes(
+            tree_structure,
+            page_list=None,
+            max_pages=None,
+            max_tokens=max_chunk_tokens_per_leaf,
+        )
 
     if if_add_node_id == 'yes':
         write_node_id(tree_structure)

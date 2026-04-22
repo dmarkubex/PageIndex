@@ -30,6 +30,10 @@ if __name__ == "__main__":
                       help='Whether to add text to the node')
     parser.add_argument('--pdf-parser', type=str, default=None,
                       help='PDF text extraction backend: PyPDF2 (default), PyMuPDF, or glm-ocr')
+    parser.add_argument('--max-chunk-pages-per-leaf', type=int, default=None,
+                      help='Max pages per leaf node chunk (enables deterministic leaf chunking, PDF only)')
+    parser.add_argument('--max-chunk-tokens-per-leaf', type=int, default=None,
+                      help='Max tokens per leaf node chunk (enables deterministic leaf chunking)')
                       
     # Markdown specific arguments
     parser.add_argument('--if-thinning', type=str, default='no',
@@ -64,6 +68,8 @@ if __name__ == "__main__":
             'if_add_doc_description': args.if_add_doc_description,
             'if_add_node_text': args.if_add_node_text,
             'pdf_parser': args.pdf_parser,
+            'max_chunk_pages_per_leaf': args.max_chunk_pages_per_leaf,
+            'max_chunk_tokens_per_leaf': args.max_chunk_tokens_per_leaf,
         }
         opt = ConfigLoader().load({k: v for k, v in user_opt.items() if v is not None})
 
@@ -105,11 +111,13 @@ if __name__ == "__main__":
             'if_add_node_summary': args.if_add_node_summary,
             'if_add_doc_description': args.if_add_doc_description,
             'if_add_node_text': args.if_add_node_text,
-            'if_add_node_id': args.if_add_node_id
+            'if_add_node_id': args.if_add_node_id,
+            'max_chunk_pages_per_leaf': args.max_chunk_pages_per_leaf,
+            'max_chunk_tokens_per_leaf': args.max_chunk_tokens_per_leaf,
         }
         
         # Load config with defaults from config.yaml
-        opt = config_loader.load(user_opt)
+        opt = config_loader.load({k: v for k, v in user_opt.items() if v is not None})
         
         toc_with_page_number = asyncio.run(md_to_tree(
             md_path=args.md_path,
@@ -120,7 +128,9 @@ if __name__ == "__main__":
             model=opt.model,
             if_add_doc_description=opt.if_add_doc_description,
             if_add_node_text=opt.if_add_node_text,
-            if_add_node_id=opt.if_add_node_id
+            if_add_node_id=opt.if_add_node_id,
+            max_chunk_pages_per_leaf=getattr(opt, 'max_chunk_pages_per_leaf', None),
+            max_chunk_tokens_per_leaf=getattr(opt, 'max_chunk_tokens_per_leaf', None),
         ))
         
         print('Parsing done, saving to file...')

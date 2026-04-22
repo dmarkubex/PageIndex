@@ -61,6 +61,40 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 return ""
 
 
+def embedding_completion(model, input_texts):
+    """Return embedding vectors for one or more input texts via LiteLLM.
+
+    Args:
+        model: Embedding model name. Accepts raw provider model names or
+            values prefixed with ``litellm/``.
+        input_texts: A single string or a list of strings to embed.
+
+    Returns:
+        A list of embedding vectors in the same order as the provided inputs.
+        Returns an empty list if all retries fail.
+    """
+    if model:
+        model = model.removeprefix("litellm/")
+    if isinstance(input_texts, str):
+        input_texts = [input_texts]
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            response = litellm.embedding(
+                model=model,
+                input=input_texts,
+            )
+            return [item["embedding"] for item in response.data]
+        except Exception as e:
+            print('************* Retrying *************')
+            logging.error(f"Error: {e}")
+            if i < max_retries - 1:
+                time.sleep(1)
+            else:
+                logging.error(f"Max retries reached for embedding model: {model}")
+                return []
+
+
 
 async def llm_acompletion(model, prompt):
     if model:
@@ -786,3 +820,170 @@ def print_wrapped(text, width=100):
     for line in text.splitlines():
         print(textwrap.fill(line, width=width))
 
+
+# ── Deterministic leaf-node chunking ─────────────────────────────────────────
+
+def _split_page_range(start, end, page_list, max_pages, max_tokens):
+    """Split page range [start, end] (1-indexed) into chunks.
+
+    Produces a list of (chunk_start, chunk_end) tuples.  Each chunk respects
+    *both* max_pages and max_tokens; a single oversized page is never split
+    (it forms a one-page chunk on its own).
+    """
+    chunks = []
+    chunk_start = start
+    chunk_tokens = 0
+    chunk_pages = 0
+
+    for page_idx in range(start, end + 1):
+        list_idx = page_idx - 1  # page_list is 0-indexed
+        page_tokens = page_list[list_idx][1] if list_idx < len(page_list) else 0
+
+        # Close the current chunk when adding this page would violate a limit.
+        # Always include at least one page per chunk to avoid infinite loops.
+        would_exceed = (
+            (max_tokens and chunk_tokens + page_tokens > max_tokens and chunk_pages >= 1) or
+            (max_pages and chunk_pages >= max_pages)
+        )
+        if would_exceed:
+            chunks.append((chunk_start, page_idx - 1))
+            chunk_start = page_idx
+            chunk_tokens = 0
+            chunk_pages = 0
+
+        chunk_tokens += page_tokens
+        chunk_pages += 1
+
+    if chunk_pages > 0:
+        chunks.append((chunk_start, end))
+
+    return chunks
+
+
+def _split_lines_by_tokens(lines, max_tokens):
+    """Split a list of text lines into groups where each group fits within max_tokens."""
+    chunks = []
+    current = []
+    current_tokens = 0
+
+    for line in lines:
+        line_tokens = count_tokens(line)
+        if current_tokens + line_tokens > max_tokens and current:
+            chunks.append(current)
+            current = []
+            current_tokens = 0
+        current.append(line)
+        current_tokens += line_tokens
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _maybe_chunk_leaf(node, page_list=None, max_pages=None, max_tokens=None):
+    """Chunk a single leaf node in-place if it exceeds the configured thresholds.
+
+    For PDF nodes (identified by start_index / end_index) the split is
+    page-based using the supplied page_list.  For Markdown nodes (identified
+    by a ``text`` field) the split is token-based over the text lines.
+    Resulting sub-nodes are attached as ``node['nodes']``.
+    """
+    # ── PDF path ──────────────────────────────────────────────────────────────
+    if 'start_index' in node and 'end_index' in node and page_list is not None:
+        start = node['start_index']
+        end = node['end_index']
+        num_pages = end - start + 1
+        tokens = sum(
+            page_list[i][1]
+            for i in range(start - 1, end)
+            if 0 <= i < len(page_list)
+        )
+        needs_chunk = (
+            (max_pages and num_pages > max_pages) or
+            (max_tokens and tokens > max_tokens)
+        )
+        if not needs_chunk:
+            return
+
+        chunks = _split_page_range(start, end, page_list, max_pages, max_tokens)
+        if len(chunks) <= 1:
+            return
+
+        parent_title = node['title']
+        node['nodes'] = [
+            {
+                'title': f"{parent_title} [Part {i}]",
+                'start_index': cs,
+                'end_index': ce,
+            }
+            for i, (cs, ce) in enumerate(chunks, 1)
+        ]
+        return
+
+    # ── Markdown path ─────────────────────────────────────────────────────────
+    text = node.get('text', '')
+    if not text or not max_tokens:
+        return
+
+    tokens = count_tokens(text)
+    if tokens <= max_tokens:
+        return
+
+    lines = text.split('\n')
+    line_chunks = _split_lines_by_tokens(lines, max_tokens)
+    if len(line_chunks) <= 1:
+        return
+
+    parent_title = node['title']
+    base_line = node.get('line_num', 0) or 0
+    sub_nodes = []
+    line_offset = 0
+    for i, chunk_lines in enumerate(line_chunks, 1):
+        sub_nodes.append({
+            'title': f"{parent_title} [Part {i}]",
+            'text': '\n'.join(chunk_lines),
+            'line_num': base_line + line_offset,
+        })
+        line_offset += len(chunk_lines)
+
+    node['nodes'] = sub_nodes
+    node.pop('text', None)
+
+
+def chunk_large_leaf_nodes(structure, page_list=None, max_pages=None, max_tokens=None):
+    """Recursively chunk oversized leaf nodes into smaller sub-nodes.
+
+    This is a post-processing step that runs *after* the tree is built but
+    *before* node IDs and summaries are assigned.  It requires no LLM calls.
+
+    Args:
+        structure:  list of tree nodes (mutated in-place).
+        page_list:  list of ``(page_text, token_count)`` tuples for PDF docs.
+                    Pass ``None`` for Markdown documents.
+        max_pages:  maximum number of pages per leaf node (PDF only).
+        max_tokens: maximum number of tokens per leaf node.
+
+    Returns:
+        The (mutated) structure list.
+    """
+    if not max_pages and not max_tokens:
+        return structure
+
+    for node in structure:
+        if node.get('nodes'):
+            chunk_large_leaf_nodes(
+                node['nodes'],
+                page_list=page_list,
+                max_pages=max_pages,
+                max_tokens=max_tokens,
+            )
+        else:
+            _maybe_chunk_leaf(
+                node,
+                page_list=page_list,
+                max_pages=max_pages,
+                max_tokens=max_tokens,
+            )
+
+    return structure

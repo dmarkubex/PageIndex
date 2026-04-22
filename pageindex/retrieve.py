@@ -1,10 +1,24 @@
 import json
+import logging
+import math
 import PyPDF2
 
 try:
-    from .utils import get_number_of_pages, remove_fields
+    from .utils import (
+        get_number_of_pages,
+        remove_fields,
+        llm_completion,
+        extract_json,
+        embedding_completion,
+    )
 except ImportError:
-    from utils import get_number_of_pages, remove_fields
+    from utils import (
+        get_number_of_pages,
+        remove_fields,
+        llm_completion,
+        extract_json,
+        embedding_completion,
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,6 +90,333 @@ def _get_md_page_content(doc_info: dict, page_nums: list[int]) -> list[dict]:
     return results
 
 
+def _get_pdf_page_map(doc_info: dict) -> dict[int, str]:
+    """Return a mapping of PDF page number to extracted page text."""
+    cached_pages = doc_info.get('pages')
+    if cached_pages:
+        return {p['page']: p['content'] for p in cached_pages}
+    path = doc_info['path']
+    with open(path, 'rb') as f:
+        pdf_reader = PyPDF2.PdfReader(f)
+        return {
+            i: pdf_reader.pages[i - 1].extract_text() or ''
+            for i in range(1, len(pdf_reader.pages) + 1)
+        }
+
+
+def _collect_md_line_text(nodes: list, line_map: dict[int, str]) -> None:
+    """Recursively collect Markdown node text into a line-number-to-text map."""
+    for node in nodes:
+        line_num = node.get('line_num')
+        if line_num is not None and line_num not in line_map:
+            line_map[line_num] = node.get('text', '')
+        if node.get('nodes'):
+            _collect_md_line_text(node['nodes'], line_map)
+
+
+def _get_md_line_map(doc_info: dict) -> dict[int, str]:
+    """Build a mapping of Markdown line numbers to node text."""
+    line_map = {}
+    _collect_md_line_text(doc_info.get('structure', []), line_map)
+    return line_map
+
+
+def _iter_leaf_nodes(nodes: list) -> list[dict]:
+    """Return every leaf node under the provided tree nodes."""
+    leaf_nodes = []
+    for node in nodes:
+        children = node.get('nodes', [])
+        if children:
+            leaf_nodes.extend(_iter_leaf_nodes(children))
+        else:
+            leaf_nodes.append(node)
+    return leaf_nodes
+
+
+def _is_line_based_node(node: dict) -> bool:
+    """Return True when a node uses Markdown line numbering instead of pages."""
+    return node.get('line_num') is not None and node.get('start_index') is None
+
+
+def _clamp_top_k(top_k: int | None, max_value: int, default: int = 5) -> int:
+    """Clamp top_k to the inclusive range [1, max_value] using a default when missing."""
+    return min(max(int(top_k or default), 1), max_value)
+
+
+def _leaf_page_spec(node: dict) -> dict:
+    """Return a dict describing the page range of a leaf node."""
+    return {
+        'start': node.get('start_index') or node.get('line_num'),
+        'end': node.get('end_index') or node.get('line_num'),
+        'type': 'line' if _is_line_based_node(node) else 'page',
+    }
+
+
+def _section_item_from_node(node: dict) -> dict:
+    """Return normalized section metadata for a leaf node."""
+    spec = _leaf_page_spec(node)
+    return {
+        'node_id': node.get('node_id'),
+        'title': node.get('title', ''),
+        'summary': node.get('summary') or node.get('prefix_summary', ''),
+        'start': spec.get('start'),
+        'end': spec.get('end'),
+        'type': spec.get('type'),
+    }
+
+
+def _get_content_from_range(doc_info: dict, spec: dict, pdf_page_map: dict[int, str] | None = None, md_line_map: dict[int, str] | None = None) -> str:
+    start = spec.get('start')
+    end = spec.get('end')
+    if start is None or end is None:
+        return ""
+    if doc_info.get('type') == 'pdf':
+        pdf_page_map = pdf_page_map or _get_pdf_page_map(doc_info)
+        return "\n\n".join(
+            pdf_page_map[p]
+            for p in range(start, end + 1)
+            if p in pdf_page_map and pdf_page_map[p]
+        )
+    md_line_map = md_line_map or _get_md_line_map(doc_info)
+    return "\n\n".join(
+        md_line_map[line]
+        for line in range(start, end + 1)
+        if line in md_line_map and md_line_map[line]
+    )
+
+
+def _build_embedding_text(node: dict, content: str) -> str:
+    parts = [
+        node.get('title', ''),
+        node.get('summary') or node.get('prefix_summary', ''),
+        content,
+    ]
+    return "\n\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def build_embedding_index(doc_info: dict, embedding_model: str) -> dict:
+    """Build and cache an embedding index for the document's leaf nodes."""
+    if not embedding_model:
+        raise ValueError("embedding_model is required")
+
+    embedding_indexes = doc_info.setdefault('embedding_indexes', {})
+    existing = embedding_indexes.get(embedding_model)
+    if existing and existing.get('items'):
+        return existing
+
+    structure = doc_info.get('structure', [])
+    leaf_nodes = _iter_leaf_nodes(structure)
+    pdf_page_map = _get_pdf_page_map(doc_info) if doc_info.get('type') == 'pdf' else None
+    md_line_map = _get_md_line_map(doc_info) if doc_info.get('type') != 'pdf' else None
+
+    items = []
+    embedding_texts = []
+    for node in leaf_nodes:
+        spec = _leaf_page_spec(node)
+        content = _get_content_from_range(doc_info, spec, pdf_page_map=pdf_page_map, md_line_map=md_line_map)
+        embedding_text = _build_embedding_text(node, content)
+        if not embedding_text:
+            continue
+        items.append(_section_item_from_node(node))
+        embedding_texts.append(embedding_text)
+
+    if not items:
+        index = {'model': embedding_model, 'items': []}
+        embedding_indexes[embedding_model] = index
+        return index
+
+    vectors = embedding_completion(model=embedding_model, input_texts=embedding_texts)
+    if len(vectors) != len(items):
+        raise RuntimeError(
+            f"Failed to build embeddings for all leaf nodes: expected {len(items)}, got {len(vectors)}"
+        )
+
+    for item, vector in zip(items, vectors):
+        item['embedding'] = vector
+
+    index = {'model': embedding_model, 'items': items}
+    embedding_indexes[embedding_model] = index
+    return index
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two embedding vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _collect_page_nums_from_ranges(items: list[dict]) -> list[int]:
+    """Return sorted unique page or line numbers covered by range items."""
+    return sorted({
+        p
+        for item in items
+        if item.get('start') is not None and item.get('end') is not None
+        for p in range(item['start'], item['end'] + 1)
+    })
+
+
+def _get_content_for_page_nums(doc_info: dict, page_nums: list[int]) -> list[dict]:
+    """Fetch page or line content for the provided normalized page numbers."""
+    if not page_nums:
+        return []
+    if doc_info.get('type') == 'pdf':
+        return _get_pdf_page_content(doc_info, page_nums)
+    return _get_md_page_content(doc_info, page_nums)
+
+
+def _get_content_entries_from_range(
+    doc_info: dict,
+    start: int | None,
+    end: int | None,
+    pdf_page_map: dict[int, str] | None = None,
+    md_line_map: dict[int, str] | None = None,
+) -> list[dict]:
+    """Fetch page or line content for an inclusive range."""
+    if start is None or end is None:
+        return []
+    if doc_info.get('type') == 'pdf':
+        pdf_page_map = pdf_page_map or _get_pdf_page_map(doc_info)
+        return [
+            {'page': p, 'content': pdf_page_map[p]}
+            for p in range(start, end + 1)
+            if p in pdf_page_map
+        ]
+    md_line_map = md_line_map or _get_md_line_map(doc_info)
+    return [
+        {'page': line, 'content': md_line_map[line]}
+        for line in range(start, end + 1)
+        if line in md_line_map
+    ]
+
+
+def _expand_item_range(
+    doc_info: dict,
+    item: dict,
+    context_window: int,
+    pdf_page_map: dict[int, str] | None = None,
+    md_line_map: dict[int, str] | None = None,
+) -> tuple[int | None, int | None]:
+    """Expand a hit range by a symmetric page/line window, clamped to document bounds."""
+    start = item.get('start')
+    end = item.get('end')
+    if start is None or end is None or context_window <= 0:
+        return start, end
+    if doc_info.get('type') == 'pdf':
+        max_index = max(pdf_page_map) if pdf_page_map else _count_pages(doc_info)
+    else:
+        max_index = max(md_line_map) if md_line_map else doc_info.get('line_count', end)
+    return max(start - context_window, 1), min(end + context_window, max_index)
+
+
+def _build_hit_results(doc_info: dict, items: list[dict], context_window: int = 0) -> list[dict]:
+    """Build structured retrieval results with scores, section metadata, and content."""
+    pdf_page_map = _get_pdf_page_map(doc_info) if doc_info.get('type') == 'pdf' else None
+    md_line_map = _get_md_line_map(doc_info) if doc_info.get('type') != 'pdf' else None
+    results = []
+    for item in items:
+        context_start, context_end = _expand_item_range(
+            doc_info,
+            item,
+            context_window=max(int(context_window or 0), 0),
+            pdf_page_map=pdf_page_map,
+            md_line_map=md_line_map,
+        )
+        content = _get_content_entries_from_range(
+            doc_info,
+            context_start,
+            context_end,
+            pdf_page_map=pdf_page_map,
+            md_line_map=md_line_map,
+        )
+        results.append({
+            'score': item.get('score'),
+            'section': {
+                'node_id': item.get('node_id'),
+                'title': item.get('title', ''),
+                'summary': item.get('summary', ''),
+                'start': item.get('start'),
+                'end': item.get('end'),
+                'type': item.get('type'),
+                'context_start': context_start,
+                'context_end': context_end,
+            },
+            'content': content,
+        })
+    return results
+
+
+def _rank_embedding_items(doc_info: dict, query: str, embedding_model: str, top_k: int) -> list[dict]:
+    """Rank indexed leaf nodes by embedding similarity to the query."""
+    index = build_embedding_index(doc_info, embedding_model)
+    items = index.get('items', [])
+    if not items:
+        return []
+
+    query_embedding = embedding_completion(model=embedding_model, input_texts=[query])
+    if not query_embedding:
+        raise RuntimeError('Failed to create query embedding')
+    query_vector = query_embedding[0]
+    top_k = _clamp_top_k(top_k, len(items))
+
+    ranked_items = []
+    for item in items:
+        ranked_item = dict(item)
+        ranked_item['score'] = _cosine_similarity(query_vector, item.get('embedding', []))
+        ranked_items.append(ranked_item)
+    ranked_items.sort(key=lambda item: item['score'], reverse=True)
+    return ranked_items[:top_k]
+
+
+def _select_hybrid_candidates(query: str, candidates: list[dict], model: str, top_k: int) -> list[dict]:
+    """Use the rerank LLM to pick the most relevant embedding-recalled candidates."""
+    if not candidates:
+        return []
+    candidate_payload = [
+        {
+            'index': i,
+            'title': item.get('title', ''),
+            'summary': item.get('summary', ''),
+            'start': item.get('start'),
+            'end': item.get('end'),
+            'score': round(item.get('score', 0.0), 4),
+        }
+        for i, item in enumerate(candidates)
+    ]
+    prompt = (
+        "You are reranking document sections for retrieval.\n\n"
+        f"Query: {query}\n\n"
+        f"Candidate sections:\n{json.dumps(candidate_payload, indent=2, ensure_ascii=False)}\n\n"
+        f"Return a JSON array with up to {top_k} candidate indices that are most useful for answering the query. "
+        "Prefer precise sections over loosely related ones. Return [] if none are relevant. "
+        "Directly return the JSON array and nothing else."
+    )
+
+    response = llm_completion(model=model, prompt=prompt)
+    try:
+        indices = extract_json(response)
+        if isinstance(indices, list):
+            selected = []
+            seen = set()
+            for index in indices:
+                if isinstance(index, int) and 0 <= index < len(candidates) and index not in seen:
+                    selected.append(candidates[index])
+                    seen.add(index)
+                if len(selected) >= top_k:
+                    break
+            return selected
+    except Exception:
+        pass
+
+    logging.warning(
+        "search_document_hybrid: failed to parse rerank response; falling back to top embedding candidates."
+    )
+    return candidates[:top_k]
+
+
 # ── Tool functions ────────────────────────────────────────────────────────────
 
 def get_document(documents: dict, doc_id: str) -> str:
@@ -131,6 +472,187 @@ def get_page_content(documents: dict, doc_id: str, pages: str) -> str:
             content = _get_pdf_page_content(doc_info, page_nums)
         else:
             content = _get_md_page_content(doc_info, page_nums)
+    except Exception as e:
+        return json.dumps({'error': f'Failed to read page content: {e}'})
+
+    return json.dumps(content, ensure_ascii=False)
+
+
+def search_document(documents: dict, doc_id: str, query: str, model: str = None) -> str:
+    """
+    Search for relevant content in a document using top-down tree traversal.
+
+    At each level of the tree, an LLM selects which nodes are relevant to the
+    query based on their titles and summaries. The search drills down to the
+    relevant leaf nodes and returns only structured hits for those sections —
+    never the whole document.
+
+    Args:
+        documents: Mapping of doc_id to document info dicts (as held by PageIndexClient).
+        doc_id: Identifier of the document to search.
+        query: Natural-language question or search query.
+        model: LLM model name to use for node selection (defaults to the caller's model).
+
+    Returns:
+        JSON-encoded list of hit dicts with score, section metadata, and nested
+        content, or a JSON object with an 'error' key on failure.
+    """
+    doc_info = documents.get(doc_id)
+    if not doc_info:
+        return json.dumps({'error': f'Document {doc_id} not found'})
+
+    structure = doc_info.get('structure', [])
+    if not structure:
+        return json.dumps({'error': 'Document has no structure'})
+
+    def _select_relevant_indices(nodes: list, query: str) -> list:
+        """Ask the LLM which nodes at this level are relevant to the query."""
+        node_summaries = [
+            {
+                'index': i,
+                'title': node.get('title', ''),
+                'summary': node.get('summary', node.get('prefix_summary', '')),
+            }
+            for i, node in enumerate(nodes)
+        ]
+
+        prompt = (
+            "Given the user query and the following document sections (with titles and "
+            "summaries), select which sections are relevant to answering the query.\n\n"
+            f"Query: {query}\n\n"
+            f"Sections:\n{json.dumps(node_summaries, indent=2, ensure_ascii=False)}\n\n"
+            "Return a JSON array of indices of the relevant sections. "
+            "Only include sections that are clearly relevant. "
+            "Example: [0, 2] or [] if none are relevant.\n"
+            "Directly return the JSON array. Do not output anything else."
+        )
+
+        response = llm_completion(model=model, prompt=prompt)
+        try:
+            indices = extract_json(response)
+            if isinstance(indices, list):
+                return [i for i in indices if isinstance(i, int) and 0 <= i < len(nodes)]
+        except Exception:
+            pass
+        # Fallback: log a warning and treat all nodes as relevant so no content is lost
+        logging.warning(
+            "search_document: failed to parse LLM node-selection response; "
+            "falling back to selecting all %d nodes at this level.",
+            len(nodes),
+        )
+        return list(range(len(nodes)))
+
+    def _collect_all_leaf_pages(node: dict) -> list:
+        """Return section items for every leaf under node (used as fallback)."""
+        children = node.get('nodes', [])
+        if not children:
+            return [_section_item_from_node(node)]
+        result = []
+        for child in children:
+            result.extend(_collect_all_leaf_pages(child))
+        return result
+
+    def _traverse(nodes: list, query: str) -> list:
+        """Recursively traverse the tree, collecting section items for relevant leaves."""
+        relevant_indices = _select_relevant_indices(nodes, query)
+        leaf_items = []
+        for i in relevant_indices:
+            node = nodes[i]
+            children = node.get('nodes', [])
+            if children:
+                child_specs = _traverse(children, query)
+                if child_specs:
+                    leaf_items.extend(child_specs)
+                else:
+                    # No child was selected — fall back to all leaves under this node
+                    leaf_items.extend(_collect_all_leaf_pages(node))
+            else:
+                leaf_items.append(_section_item_from_node(node))
+        return leaf_items
+
+    leaf_items = _traverse(structure, query)
+    if not leaf_items:
+        return json.dumps([])
+
+    try:
+        content = _build_hit_results(doc_info, leaf_items)
+    except Exception as e:
+        return json.dumps({'error': f'Failed to read page content: {e}'})
+
+    return json.dumps(content, ensure_ascii=False)
+
+
+def search_document_by_embedding(documents: dict, doc_id: str, query: str, embedding_model: str, top_k: int = 5) -> str:
+    """
+    Search for relevant content using precomputed leaf-node embeddings.
+
+    Returns the same JSON payload as search_document(): a list of structured hit dicts.
+    """
+    doc_info = documents.get(doc_id)
+    if not doc_info:
+        return json.dumps({'error': f'Document {doc_id} not found'})
+    if not embedding_model:
+        return json.dumps({'error': 'Embedding search requires an embedding_model'})
+    if not query or not query.strip():
+        return json.dumps({'error': 'Query must not be empty'})
+
+    try:
+        ranked_items = _rank_embedding_items(doc_info, query, embedding_model, top_k=top_k)
+    except Exception as e:
+        return json.dumps({'error': f'Embedding search failed: {e}'})
+
+    if not ranked_items:
+        return json.dumps([])
+
+    try:
+        content = _build_hit_results(doc_info, ranked_items)
+    except Exception as e:
+        return json.dumps({'error': f'Failed to read page content: {e}'})
+
+    return json.dumps(content, ensure_ascii=False)
+
+
+def search_document_hybrid(
+    documents: dict,
+    doc_id: str,
+    query: str,
+    model: str = None,
+    embedding_model: str = None,
+    top_k: int = 5,
+    candidate_k: int = 8,
+    context_window: int = 0,
+) -> str:
+    """
+    Search using embedding recall followed by LLM reranking of the recalled leaves.
+
+    Returns the same JSON payload as search_document(): a list of structured hit dicts.
+    """
+    doc_info = documents.get(doc_id)
+    if not doc_info:
+        return json.dumps({'error': f'Document {doc_id} not found'})
+    if not embedding_model:
+        return json.dumps({'error': 'Hybrid search requires an embedding_model'})
+    if not model:
+        return json.dumps({'error': 'Hybrid search requires a rerank model'})
+    if not query or not query.strip():
+        return json.dumps({'error': 'Query must not be empty'})
+
+    try:
+        top_k = max(int(top_k or 5), 1)
+        candidate_k = max(int(candidate_k or top_k), top_k)
+        context_window = max(int(context_window or 0), 0)
+        candidates = _rank_embedding_items(doc_info, query, embedding_model, top_k=candidate_k)
+        if not candidates:
+            return json.dumps([])
+        top_k = _clamp_top_k(top_k, len(candidates))
+        selected_items = _select_hybrid_candidates(query, candidates, model=model, top_k=top_k)
+        if not selected_items:
+            selected_items = candidates[:top_k]
+    except Exception as e:
+        return json.dumps({'error': f'Hybrid search failed: {e}'})
+
+    try:
+        content = _build_hit_results(doc_info, selected_items, context_window=context_window)
     except Exception as e:
         return json.dumps({'error': f'Failed to read page content: {e}'})
 

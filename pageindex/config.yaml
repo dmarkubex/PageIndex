@@ -1,6 +1,10 @@
 model: "gpt-4o-2024-11-20"
 # model: "anthropic/claude-sonnet-4-6"
 retrieve_model: "gpt-5.4"  # defaults to `model` if not set
+embedding_model: null
+embedding_top_k: 5
+hybrid_candidate_top_k: 8
+hybrid_context_window: 0
 toc_check_page_num: 20
 max_page_num_each_node: 10
 max_token_num_each_node: 20000
@@ -9,3 +13,9 @@ if_add_node_summary: "yes"
 if_add_doc_description: "no"
 if_add_node_text: "no"
 pdf_parser: "PyPDF2"  # options: "PyPDF2", "PyMuPDF", "glm-ocr"
+# Deterministic leaf-node chunking (no LLM required).
+# Leaf nodes exceeding either threshold are split into smaller sub-nodes so
+# that rerankers with limited context windows (e.g. 1024 tokens) can be used.
+# Set to null to disable (default).  Recommended: 3-5 for pages, 800-1000 for tokens.
+max_chunk_pages_per_leaf: null
+max_chunk_tokens_per_leaf: null
