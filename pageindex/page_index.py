@@ -4,8 +4,9 @@ import copy
 import math
 import random
 import re
+import asyncio
+from io import BytesIO
 from .utils import *
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -200,7 +201,6 @@ def extract_toc_content(content, model=None):
     return response
 
 def detect_page_index(toc_content, model=None):
-    print('start detect_page_index')
     prompt = f"""
     You will be given a table of contents.
 
@@ -241,7 +241,6 @@ def toc_extractor(page_list, toc_page_list, model):
 
 
 def toc_index_extractor(toc, content, model=None):
-    print('start toc_index_extractor')
     toc_extractor_prompt = """
     You are given a table of contents in a json format and several pages of a document, your job is to add the physical_index to the table of contents in the json format.
 
@@ -271,7 +270,6 @@ def toc_index_extractor(toc, content, model=None):
 
 
 def toc_transformer(toc_content, model=None):
-    print('start toc_transformer')
     init_prompt = """
     You are given a table of contents, You job is to transform the whole table of content into a JSON format included table_of_contents.
 
@@ -339,7 +337,6 @@ def toc_transformer(toc_content, model=None):
 
 
 def find_toc_pages(start_page_index, page_list, opt, logger=None):
-    print('start find_toc_pages')
     last_page_is_yes = False
     toc_page_list = []
     i = start_page_index
@@ -454,8 +451,7 @@ def page_list_to_group_text(page_contents, token_lengths, max_tokens=20000, over
     # Add the last subset if it contains any pages
     if current_subset:
         subsets.append(''.join(current_subset))
-    
-    print('divide page_list to groups', len(subsets))
+
     return subsets
 
 def add_page_number_to_toc(part, structure, model=None):
@@ -505,7 +501,6 @@ def remove_first_physical_index_section(text):
 
 ### add verify completeness
 def generate_toc_continue(toc_content, part, model=None):
-    print('start generate_toc_continue')
     prompt = """
     You are an expert in extracting hierarchical tree structure.
     You are given a tree structure of the previous part and the text of the current part.
@@ -540,7 +535,6 @@ def generate_toc_continue(toc_content, part, model=None):
     
 ### add verify completeness
 def generate_toc_init(part, model=None):
-    print('start generate_toc_init')
     prompt = """
     You are an expert in extracting hierarchical tree structure, your task is to generate the tree structure of the document.
 
@@ -581,16 +575,19 @@ def process_no_toc(page_list, start_index=1, model=None, logger=None):
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, model))
     group_texts = page_list_to_group_text(page_contents, token_lengths)
-    logger.info(f'len(group_texts): {len(group_texts)}')
+    if logger:
+        logger.info(f'len(group_texts): {len(group_texts)}')
 
     toc_with_page_number= generate_toc_init(group_texts[0], model)
     for group_text in group_texts[1:]:
-        toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)    
+        toc_with_page_number_additional = generate_toc_continue(toc_with_page_number, group_text, model)
         toc_with_page_number.extend(toc_with_page_number_additional)
-    logger.info(f'generate_toc: {toc_with_page_number}')
+    if logger:
+        logger.info(f'generate_toc: {toc_with_page_number}')
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
-    logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
+    if logger:
+        logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
 
     return toc_with_page_number
 
@@ -598,22 +595,26 @@ def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_in
     page_contents=[]
     token_lengths=[]
     toc_content = toc_transformer(toc_content, model)
-    logger.info(f'toc_transformer: {toc_content}')
+    if logger:
+        logger.info(f'toc_transformer: {toc_content}')
     for page_index in range(start_index, start_index+len(page_list)):
         page_text = f"<physical_index_{page_index}>\n{page_list[page_index-start_index][0]}\n<physical_index_{page_index}>\n\n"
         page_contents.append(page_text)
         token_lengths.append(count_tokens(page_text, model))
-    
+
     group_texts = page_list_to_group_text(page_contents, token_lengths)
-    logger.info(f'len(group_texts): {len(group_texts)}')
+    if logger:
+        logger.info(f'len(group_texts): {len(group_texts)}')
 
     toc_with_page_number=copy.deepcopy(toc_content)
     for group_text in group_texts:
         toc_with_page_number = add_page_number_to_toc(group_text, toc_with_page_number, model)
-    logger.info(f'add_page_number_to_toc: {toc_with_page_number}')
+    if logger:
+        logger.info(f'add_page_number_to_toc: {toc_with_page_number}')
 
     toc_with_page_number = convert_physical_index_to_int(toc_with_page_number)
-    logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
+    if logger:
+        logger.info(f'convert_physical_index_to_int: {toc_with_page_number}')
 
     return toc_with_page_number
 
@@ -621,32 +622,39 @@ def process_toc_no_page_numbers(toc_content, toc_page_list, page_list,  start_in
 
 def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=None, model=None, logger=None):
     toc_with_page_number = toc_transformer(toc_content, model)
-    logger.info(f'toc_with_page_number: {toc_with_page_number}')
+    if logger:
+        logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     toc_no_page_number = remove_page_number(copy.deepcopy(toc_with_page_number))
-    
+
     start_page_index = toc_page_list[-1] + 1
     main_content = ""
     for page_index in range(start_page_index, min(start_page_index + toc_check_page_num, len(page_list))):
         main_content += f"<physical_index_{page_index+1}>\n{page_list[page_index][0]}\n<physical_index_{page_index+1}>\n\n"
 
     toc_with_physical_index = toc_index_extractor(toc_no_page_number, main_content, model)
-    logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
+    if logger:
+        logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
 
     toc_with_physical_index = convert_physical_index_to_int(toc_with_physical_index)
-    logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
+    if logger:
+        logger.info(f'toc_with_physical_index: {toc_with_physical_index}')
 
     matching_pairs = extract_matching_page_pairs(toc_with_page_number, toc_with_physical_index, start_page_index)
-    logger.info(f'matching_pairs: {matching_pairs}')
+    if logger:
+        logger.info(f'matching_pairs: {matching_pairs}')
 
     offset = calculate_page_offset(matching_pairs)
-    logger.info(f'offset: {offset}')
+    if logger:
+        logger.info(f'offset: {offset}')
 
     toc_with_page_number = add_page_offset_to_toc_json(toc_with_page_number, offset)
-    logger.info(f'toc_with_page_number: {toc_with_page_number}')
+    if logger:
+        logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     toc_with_page_number = process_none_page_numbers(toc_with_page_number, page_list, model=model)
-    logger.info(f'toc_with_page_number: {toc_with_page_number}')
+    if logger:
+        logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
     return toc_with_page_number
 
@@ -663,9 +671,9 @@ def process_none_page_numbers(toc_items, page_list, start_index=1, model=None):
                 if toc_items[j].get('physical_index') is not None:
                     prev_physical_index = toc_items[j]['physical_index']
                     break
-            
-            # Find next physical_index
-            next_physical_index = -1  # Default if no next item exists
+
+            # Find next physical_index - use page_list length if no next item exists
+            next_physical_index = len(page_list) + start_index - 1  # Default to last page if no next item exists
             for j in range(i + 1, len(toc_items)):
                 if toc_items[j].get('physical_index') is not None:
                     next_physical_index = toc_items[j]['physical_index']
@@ -682,12 +690,12 @@ def process_none_page_numbers(toc_items, page_list, start_index=1, model=None):
                     continue
 
             item_copy = copy.deepcopy(item)
-            del item_copy['page']
+            item_copy.pop('page', None)  # Safe deletion
             result = add_page_number_to_toc(page_contents, item_copy, model)
             if isinstance(result[0]['physical_index'], str) and result[0]['physical_index'].startswith('<physical_index'):
                 item['physical_index'] = int(result[0]['physical_index'].split('_')[-1].rstrip('>').strip())
-                del item['page']
-    
+                item.pop('page', None)  # Safe deletion
+
     return toc_items
 
 
@@ -699,11 +707,9 @@ def check_toc(page_list, opt=None):
         print('no toc found')
         return {'toc_content': None, 'toc_page_list': [], 'page_index_given_in_toc': 'no'}
     else:
-        print('toc found')
         toc_json = toc_extractor(page_list, toc_page_list, opt.model)
 
         if toc_json['page_index_given_in_toc'] == 'yes':
-            print('index found')
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'yes'}
         else:
             current_start_index = toc_page_list[-1] + 1
@@ -723,12 +729,10 @@ def check_toc(page_list, opt=None):
 
                 additional_toc_json = toc_extractor(page_list, additional_toc_pages, opt.model)
                 if additional_toc_json['page_index_given_in_toc'] == 'yes':
-                    print('index found')
                     return {'toc_content': additional_toc_json['toc_content'], 'toc_page_list': additional_toc_pages, 'page_index_given_in_toc': 'yes'}
 
                 else:
                     current_start_index = additional_toc_pages[-1] + 1
-            print('index not found')
             return {'toc_content': toc_json['toc_content'], 'toc_page_list': toc_page_list, 'page_index_given_in_toc': 'no'}
 
 
@@ -758,7 +762,6 @@ async def single_toc_item_index_fixer(section_title, content, model=None):
 
 
 async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, start_index=1, model=None, logger=None):
-    print(f'start fix_incorrect_toc with {len(incorrect_results)} incorrect results')
     incorrect_indices = {result['list_index'] for result in incorrect_results}
     
     end_index = len(page_list) + start_index - 1
@@ -842,7 +845,8 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(incorrect_results, results):
         if isinstance(result, Exception):
-            print(f"Processing item {item} generated an exception: {result}")
+            # Log processing errors without printing
+            pass
             continue
     results = [result for result in results if not isinstance(result, Exception)]
 
@@ -868,27 +872,26 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
                 'physical_index': result['physical_index'],
             })
 
-    logger.info(f'incorrect_results_and_range_logs: {incorrect_results_and_range_logs}')
-    logger.info(f'invalid_results: {invalid_results}')
+    if logger:
+        logger.info(f'incorrect_results_and_range_logs: {incorrect_results_and_range_logs}')
+        logger.info(f'invalid_results: {invalid_results}')
 
     return toc_with_page_number, invalid_results
 
 
 
 async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results, start_index=1, max_attempts=3, model=None, logger=None):
-    print('start fix_incorrect_toc')
     fix_attempt = 0
     current_toc = toc_with_page_number
     current_incorrect = incorrect_results
 
     while current_incorrect:
-        print(f"Fixing {len(current_incorrect)} incorrect results")
-        
         current_toc, current_incorrect = await fix_incorrect_toc(current_toc, page_list, current_incorrect, start_index, model, logger)
                 
         fix_attempt += 1
         if fix_attempt >= max_attempts:
-            logger.info("Maximum fix attempts reached")
+            if logger:
+                logger.info("Maximum fix attempts reached")
             break
     
     return current_toc, current_incorrect
@@ -898,7 +901,6 @@ async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorr
 
 ################### verify toc #########################################################
 async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
-    print('start verify_toc')
     # Find the last non-None physical_index
     last_physical_index = None
     for item in reversed(list_result):
@@ -912,11 +914,9 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     
     # Determine which items to check
     if N is None:
-        print('check all items')
         sample_indices = range(0, len(list_result))
     else:
         N = min(N, len(list_result))
-        print(f'check {N} items')
         sample_indices = random.sample(range(0, len(list_result)), N)
 
     # Prepare items with their list indices
@@ -948,7 +948,6 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     # Calculate accuracy
     checked_count = len(results)
     accuracy = correct_count / checked_count if checked_count > 0 else 0
-    print(f"accuracy: {accuracy*100:.2f}%")
     return accuracy, incorrect_results
 
 
@@ -957,9 +956,6 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
 
 ################### main process #########################################################
 async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None):
-    print(mode)
-    print(f'start_index: {start_index}')
-    
     if mode == 'process_toc_with_page_numbers':
         toc_with_page_number = process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, model=opt.model, logger=logger)
     elif mode == 'process_toc_no_page_numbers':
@@ -977,12 +973,13 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
     )
     
     accuracy, incorrect_results = await verify_toc(page_list, toc_with_page_number, start_index=start_index, model=opt.model)
-        
-    logger.info({
-        'mode': 'process_toc_with_page_numbers',
-        'accuracy': accuracy,
-        'incorrect_results': incorrect_results
-    })
+
+    if logger:
+        logger.info({
+            'mode': 'process_toc_with_page_numbers',
+            'accuracy': accuracy,
+            'incorrect_results': incorrect_results
+        })
     if accuracy == 1.0 and len(incorrect_results) == 0:
         return toc_with_page_number
     if accuracy > 0.6 and len(incorrect_results) > 0:
@@ -1002,8 +999,6 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
     token_num = sum([page[1] for page in node_page_list])
     
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
-        print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
-
         node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
         node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
         
@@ -1028,7 +1023,8 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
 
 async def tree_parser(page_list, opt, doc=None, logger=None):
     check_toc_result = check_toc(page_list, opt)
-    logger.info(check_toc_result)
+    if logger:
+        logger.info(check_toc_result)
 
     if check_toc_result.get("toc_content") and check_toc_result["toc_content"].strip() and check_toc_result["page_index_given_in_toc"] == "yes":
         toc_with_page_number = await meta_processor(
@@ -1076,8 +1072,9 @@ def page_index_main(doc, opt=None):
     print('Parsing PDF...')
     page_list = get_page_tokens(doc, model=opt.model, pdf_parser=getattr(opt, 'pdf_parser', 'PyPDF2'))
 
-    logger.info({'total_page_number': len(page_list)})
-    logger.info({'total_token': sum([page[1] for page in page_list])})
+    if logger:
+        logger.info({'total_page_number': len(page_list)})
+        logger.info({'total_token': sum([page[1] for page in page_list])})
 
     async def page_index_builder():
         structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
