@@ -120,19 +120,31 @@ def create_app() -> Flask:
 
         stem = _safe_stem(uploaded.filename)
 
+        # Determine validated category and a fixed extension for the on-disk
+        # filename so that user input never flows into the path. The ext check
+        # above only gates which branch we take here.
+        if ext in ALLOWED_PDF_EXTS:
+            saved_ext = ".pdf"
+            is_pdf = True
+        else:
+            saved_ext = ".md"
+            is_pdf = False
+
         # Save upload to a unique temp directory; clean up after processing.
         with tempfile.TemporaryDirectory(prefix="pageindex_upload_") as tmpdir:
-            saved_path = os.path.join(tmpdir, f"{uuid.uuid4().hex}{ext}")
+            saved_path = os.path.join(tmpdir, f"{uuid.uuid4().hex}{saved_ext}")
             uploaded.save(saved_path)
 
             try:
-                if ext in ALLOWED_PDF_EXTS:
+                if is_pdf:
                     tree = _process_pdf(saved_path, request.form)
                 else:
                     tree = _process_md(saved_path, request.form)
-            except Exception as exc:  # noqa: BLE001 - surface error message to client
+            except Exception:  # noqa: BLE001 - log full trace, hide details from client
                 app.logger.exception("Processing failed")
-                return jsonify({"error": f"Processing failed: {exc}"}), 500
+                return jsonify({
+                    "error": "Processing failed. Please check the server logs for details."
+                }), 500
 
         # Serialize result and stream as a download.
         payload = json.dumps(tree, indent=2, ensure_ascii=False).encode("utf-8")
@@ -161,4 +173,7 @@ if __name__ == "__main__":
     host = os.environ.get("PAGEINDEX_HOST", "127.0.0.1")
     port = int(os.environ.get("PAGEINDEX_PORT", "5000"))
     debug = os.environ.get("PAGEINDEX_DEBUG", "0") == "1"
+    # WARNING: PAGEINDEX_DEBUG enables Flask's interactive debugger, which can
+    # execute arbitrary code through the browser. Only enable it on a trusted
+    # local machine for development; never set it in production.
     app.run(host=host, port=port, debug=debug)

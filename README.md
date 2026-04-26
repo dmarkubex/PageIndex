@@ -220,7 +220,7 @@ Environment variables:
 | --- | --- | --- |
 | `PAGEINDEX_HOST` | `127.0.0.1` | Bind address |
 | `PAGEINDEX_PORT` | `5000` | Port |
-| `PAGEINDEX_DEBUG` | `0` | Set to `1` to enable Flask debug mode |
+| `PAGEINDEX_DEBUG` | `0` | Set to `1` to enable Flask debug mode (**local development only — exposes an interactive code-execution debugger; never use in production**) |
 | `PAGEINDEX_MAX_UPLOAD_MB` | `50` | Maximum upload size in MB |
 
 > Uploaded files are written to a per-request temporary directory and removed
