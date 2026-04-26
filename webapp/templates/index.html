@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PageIndex · Web UI</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>PageIndex</h1>
+      <p class="subtitle">
+        上传 PDF 或 Markdown 文件，自动生成层级树结构 JSON 并下载。<br />
+        <span class="muted">Upload a PDF or Markdown file, generate the hierarchical tree, and download the JSON.</span>
+      </p>
+    </header>
+
+    <form id="upload-form" class="card">
+      <label class="field">
+        <span class="label">文件 / File</span>
+        <input
+          id="file-input"
+          type="file"
+          name="file"
+          accept=".pdf,.md,.markdown"
+          required
+        />
+        <small class="hint">支持 .pdf / .md / .markdown，单文件最大 {{ max_upload_mb }} MB</small>
+      </label>
+
+      <details class="options">
+        <summary>高级选项 / Advanced options</summary>
+
+        <label class="field">
+          <span class="label">模型 / Model <small class="hint">（留空使用 config.yaml 默认）</small></span>
+          <input type="text" name="model" placeholder="例如 / e.g. gpt-4o-2024-11-20" />
+        </label>
+
+        <div class="grid">
+          <label class="check">
+            <input type="checkbox" name="if_add_node_id" value="yes" checked />
+            添加节点 ID / Add node id
+          </label>
+          <label class="check">
+            <input type="checkbox" name="if_add_node_summary" value="yes" checked />
+            添加节点摘要 / Add node summary
+          </label>
+          <label class="check">
+            <input type="checkbox" name="if_add_doc_description" value="yes" />
+            添加文档描述 / Add doc description
+          </label>
+          <label class="check">
+            <input type="checkbox" name="if_add_node_text" value="yes" />
+            添加节点全文 / Add node text
+          </label>
+        </div>
+      </details>
+
+      <button id="submit-btn" type="submit" class="primary">
+        开始处理并下载 / Process &amp; Download
+      </button>
+    </form>
+
+    <section id="status" class="status hidden" role="status" aria-live="polite"></section>
+
+    <footer class="muted small">
+      Powered by PageIndex · 本地运行，文件不会被持久化保存。
+    </footer>
+  </main>
+
+  <script>
+    const form = document.getElementById("upload-form");
+    const statusEl = document.getElementById("status");
+    const submitBtn = document.getElementById("submit-btn");
+    const fileInput = document.getElementById("file-input");
+
+    function showStatus(message, kind) {
+      statusEl.textContent = message;
+      statusEl.className = "status " + (kind || "info");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        showStatus("请先选择文件 / Please choose a file.", "error");
+        return;
+      }
+
+      const data = new FormData(form);
+      submitBtn.disabled = true;
+      const originalLabel = submitBtn.textContent;
+      submitBtn.textContent = "处理中 / Processing…";
+      showStatus("正在上传并处理文件，可能需要一些时间…\nUploading and processing, this may take a while…", "info");
+
+      try {
+        const response = await fetch("/api/process", {
+          method: "POST",
+          body: data,
+        });
+
+        if (!response.ok) {
+          let message = `请求失败 / Request failed (${response.status})`;
+          try {
+            const err = await response.json();
+            if (err && err.error) message = err.error;
+          } catch (_) {
+            /* ignore JSON parse errors */
+          }
+          showStatus(message, "error");
+          return;
+        }
+
+        // Determine filename from Content-Disposition.
+        const disposition = response.headers.get("Content-Disposition") || "";
+        let filename = "structure.json";
+        const match = /filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i.exec(disposition);
+        if (match && match[1]) {
+          try {
+            filename = decodeURIComponent(match[1]);
+          } catch (_) {
+            filename = match[1];
+          }
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        showStatus(`处理完成，已下载: ${filename}\nDone, downloaded: ${filename}`, "success");
+      } catch (err) {
+        showStatus("网络错误 / Network error: " + err.message, "error");
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalLabel;
+      }
+    });
+  </script>
+</body>
+</html>
