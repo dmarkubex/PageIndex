@@ -191,6 +191,43 @@ python3 run_pageindex.py --md_path /path/to/your/document.md
 > Note: in this mode, we use "#" to determine node headings and their levels. For example, "##" is level 2, "###" is level 3, etc. Make sure your markdown file is formatted correctly. If your Markdown file was converted from a PDF or HTML, we don't recommend using this mode, since most existing conversion tools cannot preserve the original hierarchy. Instead, use our [PageIndex OCR](https://pageindex.ai/blog/ocr), which is designed to preserve the original hierarchy, to convert the PDF to a markdown file and then use this mode.
 </details>
 
+## 🌐 Web UI (Upload & Download)
+
+A minimal local web app is included for users who prefer a browser workflow:
+upload a PDF or Markdown file, run the PageIndex pipeline, and download the
+resulting tree structure as a JSON file.
+
+```bash
+# 1. Install dependencies (Flask is included in requirements.txt)
+pip3 install -r requirements.txt
+
+# 2. Make sure your LLM credentials (e.g. OPENAI_API_KEY) are set, e.g. via .env
+
+# 3. Start the web server
+python3 -m webapp.app
+# or:
+# flask --app webapp.app run
+```
+
+Then open `http://127.0.0.1:5000` in your browser, choose a `.pdf` / `.md` /
+`.markdown` file, optionally adjust advanced options (model, node id, summary,
+etc.), click **Process & Download**, and the generated `<name>_structure.json`
+will be downloaded automatically.
+
+Environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PAGEINDEX_HOST` | `127.0.0.1` | Bind address |
+| `PAGEINDEX_PORT` | `5000` | Port |
+| `PAGEINDEX_DEBUG` | `0` | Set to `1` to enable Flask debug mode (**local development only — exposes an interactive code-execution debugger; never use in production**) |
+| `PAGEINDEX_MAX_UPLOAD_MB` | `50` | Maximum upload size in MB |
+
+> Uploaded files are written to a per-request temporary directory and removed
+> immediately after processing; only the resulting JSON is streamed back to
+> the browser.
+
+
 ## Agentic Vectorless RAG: An Example
 
 For a simple, end-to-end _**agentic vectorless RAG**_ example using PageIndex with OpenAI Agents SDK, see [`examples/agentic_vectorless_rag_demo.py`](examples/agentic_vectorless_rag_demo.py).
