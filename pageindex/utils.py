@@ -159,8 +159,8 @@ def extract_json(content):
             # Remove any trailing commas before closing brackets/braces
             json_content = json_content.replace(',]', ']').replace(',}', '}')
             return json.loads(json_content)
-        except:
-            logging.error("Failed to parse JSON even after cleanup")
+        except json.JSONDecodeError as cleanup_error:
+            logging.error(f"Failed to parse JSON even after cleanup: {cleanup_error}")
             return {}
     except Exception as e:
         logging.error(f"Unexpected error while extracting JSON: {e}")
@@ -209,7 +209,7 @@ def structure_to_list(structure):
     
 def get_leaf_nodes(structure):
     if isinstance(structure, dict):
-        if not structure['nodes']:
+        if not structure.get('nodes'):  # Safe access with .get()
             structure_node = copy.deepcopy(structure)
             structure_node.pop('nodes', None)
             return [structure_node]
